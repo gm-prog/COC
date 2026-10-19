@@ -359,3 +359,34 @@ building never existed at any playable level, §7.5 charges a 0 refund for start
 The command removes the building, frees the builder and emits `BuildingRemoved` after
 `UpgradeCancelled`, so a client can cancel its construction animation and drop the sprite. A
 normal upgrade (level ≥ 1) keeps the building at its current level, as before.
+
+## D32 · 2026-10-19 · One canonical Keep, five builders, integer speed-up rounding
+
+Three invariants that the runtime already relied on are now enforced where a bad balance
+table can be caught: at validation time.
+
+**The Keep has one identity.** `findKeep`, `catchUp` and `SpeedUp` locate the Keep by the
+literal id `keep`, not by category. Validation therefore requires exactly one `hq` definition
+_and_ requires that definition to carry `KEEP_BUILDING_ID`. Without the second half, a config
+could rename the HQ and still pass: the runtime would never raise `keepLevel`, and the
+`maxKeeps` ceiling would be checked against a building the game never treats as the Keep. The
+ceiling now applies to every `hq` row rather than only the first one found, so a second HQ
+cannot carry a larger count in its own row.
+
+The alternative — teaching the runtime to find the Keep by category — was rejected as a larger
+change: it would touch `state`, `economy` and `commands` and would still leave the id/category
+pairing unchecked, whereas one validation rule makes the existing literals provably correct.
+
+**The builder ceiling is a rule, not a tunable.** Spec §7.5 states "max 5". `MAX_BUILDERS` is a
+single exported constant; `checkEconomy` rejects a larger `maxBuilders` instead of clamping it,
+so an over-eager balance table fails loudly at import. The existing checks (positive integer,
+not below the starter count, exactly `maxBuilders - starter.builders` prices, positive integer
+gem prices) are unchanged.
+
+**Speed-up interpolation is integer arithmetic.** Spec §6.4 requires integer/fixed-point
+simulation maths, but the cost curve interpolated with a floating-point ratio and rounded
+afterwards. It now computes `deltaGems * offsetMs / span` with BigInt intermediates and
+half-up rounding — `floor((2n + span) / (2 * span))` — which is exactly `Math.round` for the
+non-negative prices the validator admits, and stays exact for any schema-valid anchor pair
+where `deltaGems * offsetMs` would exceed `Number.MAX_SAFE_INTEGER`. Anchors, prices and the
+final `minimumGems` rule are unchanged.

@@ -17,6 +17,9 @@ import type {
 } from '../config/types.js';
 import type { PlayerState } from '../state/index.js';
 
+/** `Number.MAX_SAFE_INTEGER` as a BigInt, for the conversion guard below. */
+const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+
 /** Why an upgrade cannot start, in the order the checks run. */
 export type UpgradeRejection =
   | 'not_found'
@@ -233,9 +236,29 @@ export function speedUpCost(remainingMs: number, config: GameConfig): number {
     if (ms > currentMs) continue;
 
     const span = currentMs - previousMs;
-    const offset = span <= 0 ? 0 : (ms - previousMs) / span;
-    const interpolated = previous.gems + (current.gems - previous.gems) * offset;
-    return Math.max(minimumGems, Math.round(interpolated));
+    // Defensive: the validator enforces strictly ascending anchors, so a
+    // non-positive span can only come from a hand-built config.
+    if (span <= 0) return Math.max(minimumGems, previous.gems);
+
+    // Exact rational interpolation, spec Section 6.4 (integer arithmetic only):
+    //
+    //   gems = previous.gems + deltaGems * offsetMs / span
+    //
+    // rounded half up, which is `Math.round`'s convention for the non-negative
+    // prices the validator admits. BigInt carries the intermediate product
+    // because a schema-valid config may pair a large anchor with a large gem
+    // count, and `deltaGems * offsetMs` can exceed Number.MAX_SAFE_INTEGER.
+    // The result is converted back to a number only when it fits.
+    const deltaGems = current.gems - previous.gems;
+    const offsetMs = Math.max(0, ms - previousMs);
+    const numerator = BigInt(deltaGems) * BigInt(offsetMs);
+    const denominator = BigInt(span);
+    // floor((2 * delta * offset + span) / (2 * span)) — round half up.
+    const rounded = (2n * numerator + denominator) / (2n * denominator);
+
+    const total = BigInt(previous.gems) + rounded;
+    if (total > MAX_SAFE_BIGINT) return Math.max(minimumGems, Number.MAX_SAFE_INTEGER);
+    return Math.max(minimumGems, Number(total));
   }
 
   return Math.max(minimumGems, last.gems);

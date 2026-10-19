@@ -71,6 +71,8 @@ export {
   type GridGeometry,
 } from './config/geometry.js';
 export {
+  KEEP_BUILDING_ID,
+  MAX_BUILDERS,
   RESOURCE_IDS,
   type ResourceId,
   type ResourceAmount,

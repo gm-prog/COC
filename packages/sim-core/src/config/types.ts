@@ -20,6 +20,25 @@ export type ResourceAmount = Partial<Record<ResourceId, number>>;
 export type BuildingCategory =
   'economy' | 'storage' | 'army' | 'defense' | 'trap' | 'wall' | 'hq' | 'misc';
 
+/**
+ * The canonical id of the village Keep (spec Section 7.3).
+ *
+ * The runtime identifies the Keep by this id rather than by category:
+ * `findKeep`, the `keepLevel` write in `catchUp` and the one in `SpeedUp` all
+ * compare `building.type` against it. The validator therefore requires the
+ * single `hq` definition to carry this id, so a config cannot add an HQ the
+ * runtime would silently ignore (or a Keep the runtime would not treat as HQ).
+ */
+export const KEEP_BUILDING_ID = 'keep';
+
+/**
+ * Spec Section 7.5: "Player starts with 2 builders. ... Extra builders (max 5)".
+ *
+ * This is a game rule, not a tunable: a config that asks for more than five is
+ * rejected rather than clamped, and raising it requires a specification change.
+ */
+export const MAX_BUILDERS = 5;
+
 export interface BuildingSize {
   w: number;
   h: number;

@@ -792,3 +792,110 @@ describe('starter layout overlaps (validate 7.2)', () => {
     expect(() => validateGameConfig(raw)).not.toThrow();
   });
 });
+
+describe('HQ identity (validate 7.3)', () => {
+  it('accepts exactly one HQ definition carrying the canonical id', () => {
+    expect(validateGameConfig(minimal()).buildings[0]?.id).toBe('keep');
+  });
+
+  it('rejects a config with no HQ definition', () => {
+    const raw = minimal();
+    raw.buildings[0].category = 'misc';
+    const issues = issuesFor(raw);
+    expect(issues).toContain('config must define exactly one HQ building (category "hq"), found 0');
+    // The starter still references it, so the starter rule also fires; neither
+    // rule may be satisfied by simply dropping the category.
+    expect(issues).toContain('starter layout must contain exactly one Keep (found 0)');
+  });
+
+  it('rejects a second HQ definition', () => {
+    const raw = minimal();
+    raw.buildings.push({
+      id: 'fortress',
+      category: 'hq',
+      size: { w: 4, h: 4 },
+      unlock: { keepLevel: 1 },
+      levels: [{ level: 1, hp: 100, cost: {}, buildSeconds: 0, requiresKeep: 1 }],
+    });
+    raw.limits.buildingCounts.fortress = [0, 1];
+    expect(issuesFor(raw)).toContain(
+      'config must define exactly one HQ building (category "hq"), found 2',
+    );
+  });
+
+  it('rejects an HQ whose id is not the canonical keep', () => {
+    const raw = minimal();
+    // Rename consistently: building, count row and starter all point at the
+    // new id, so the only remaining problem is that the runtime looks for
+    // "keep" and would never find this HQ.
+    raw.buildings[0].id = 'stronghold';
+    raw.limits.buildingCounts.stronghold = raw.limits.buildingCounts.keep;
+    delete raw.limits.buildingCounts.keep;
+    raw.starter.buildings[0].type = 'stronghold';
+    expect(issuesFor(raw)).toContain(
+      'the single HQ building must use the canonical id "keep", got "stronghold"',
+    );
+  });
+
+  it('cannot route around maxKeeps through a second HQ row', () => {
+    const raw = minimal();
+    raw.buildings.push({
+      id: 'fortress',
+      category: 'hq',
+      size: { w: 4, h: 4 },
+      unlock: { keepLevel: 1 },
+      levels: [{ level: 1, hp: 100, cost: {}, buildSeconds: 0, requiresKeep: 1 }],
+    });
+    // Two Keeps at Keep 1: both the identity rule and the ceiling rule fire.
+    raw.limits.buildingCounts.fortress = [0, 2];
+    const issues = issuesFor(raw);
+    expect(issues).toContain('found 2');
+    expect(issues).toContain(
+      'limits.buildingCounts["fortress"] allows more than limits.maxKeeps (1) at some Keep level',
+    );
+  });
+
+  it('still bounds the canonical HQ row by maxKeeps', () => {
+    const raw = minimal();
+    raw.limits.buildingCounts.keep[1] = 2;
+    expect(issuesFor(raw)).toContain(
+      'limits.buildingCounts["keep"] allows more than limits.maxKeeps (1) at some Keep level',
+    );
+  });
+});
+
+describe('builder ceiling (spec 7.5)', () => {
+  it('accepts the maximum of five builders', () => {
+    expect(validateGameConfig(minimal()).economy.builders.maxBuilders).toBe(5);
+  });
+
+  it('rejects six builders even when the price list matches', () => {
+    const raw = minimal();
+    raw.economy.builders.maxBuilders = 6;
+    // Lengthened to maxBuilders - starter.builders, so the only remaining
+    // complaint must be the ceiling itself.
+    raw.economy.builders.costs.push({ gems: 2000 });
+    const issues = issuesFor(raw);
+    expect(issues).toContain(
+      'economy.builders.maxBuilders (6) exceeds the Phase 2 maximum of 5 builders (spec 7.5)',
+    );
+    expect(issues).not.toContain('must contain exactly');
+  });
+
+  it('still rejects a maximum below the starter builder count', () => {
+    const raw = minimal();
+    raw.economy.builders.maxBuilders = 1;
+    raw.economy.builders.costs = [{ gems: 250 }];
+    expect(issuesFor(raw)).toContain(
+      'economy.builders.maxBuilders (1) is below the starter builder count (2)',
+    );
+  });
+
+  it('still loads the shipped three-price shop', () => {
+    const raw = minimal();
+    expect(validateGameConfig(raw).economy.builders).toEqual({
+      maxBuilders: 5,
+      costs: [{ gems: 250 }, { gems: 500 }, { gems: 1000 }],
+    });
+  });
+});

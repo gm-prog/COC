@@ -286,3 +286,107 @@ describe('builder shop', () => {
     expect(canBuyBuilder(state, config)).toBe(false);
   });
 });
+
+describe('speedUpCost — exact integer interpolation', () => {
+  /**
+   * A small, valid table whose midpoint is an exact half-gem: 1 s -> 1 gem,
+   * 3 s -> 2 gems, so 2 s is 1.5 gems. Cloned from the fixture so the shared
+   * config other tests read is untouched.
+   */
+  const halfGemConfig = () => {
+    const clone = JSON.parse(JSON.stringify(config)) as typeof config;
+    clone.economy.speedUp = {
+      anchors: [
+        { seconds: 1, gems: 1 },
+        { seconds: 3, gems: 2 },
+      ],
+      minimumGems: 1,
+    };
+    return clone;
+  };
+
+  it('returns the configured price at every anchor', () => {
+    const small = halfGemConfig();
+    expect(speedUpCost(1000, small)).toBe(1);
+    expect(speedUpCost(3000, small)).toBe(2);
+
+    // The production anchors are unchanged: at each of them the interpolation
+    // must reproduce the configured value exactly, not merely a rounded one.
+    for (const [ms, gems] of [
+      [60_000, 1],
+      [3_600_000, 20],
+      [86_400_000, 260],
+      [604_800_000, 1000],
+    ] as [number, number][]) {
+      expect(speedUpCost(ms, config), `${ms} ms`).toBe(gems);
+    }
+  });
+
+  it('rounds an exact half gem upward', () => {
+    // 2 s sits exactly halfway between 1 s and 3 s: 1.5 gems -> 2.
+    expect(speedUpCost(2000, halfGemConfig())).toBe(2);
+  });
+
+  it('rounds one millisecond either side of the halfway point correctly', () => {
+    const small = halfGemConfig();
+    // 1 ms below halfway is 1.4995 gems -> 1.
+    expect(speedUpCost(1999, small)).toBe(1);
+    // 1 ms above halfway is 1.5005 gems -> 2.
+    expect(speedUpCost(2001, small)).toBe(2);
+    // The production table's 60 s -> 1 h segment also has an exact .5 midpoint:
+    // 1,830,000 ms is 10.5 gems, so 1 ms below rounds down to 10 and the
+    // halfway point itself rounds up to 11.
+    expect(speedUpCost(1_829_999, config)).toBe(10);
+    expect(speedUpCost(1_830_000, config)).toBe(11);
+    expect(speedUpCost(1_830_001, config)).toBe(11);
+  });
+
+  it('interpolates correctly immediately before and after an anchor', () => {
+    // Approaching 1 h from below stays at 20; just past it stays at 20.
+    expect(speedUpCost(3_599_999, config)).toBe(20);
+    expect(speedUpCost(3_600_000, config)).toBe(20);
+    expect(speedUpCost(3_600_001, config)).toBe(20);
+
+    // One hour past the 1 h anchor: 20 + 240 * 3,600,000 / 82,800,000 = 30.43.
+    expect(speedUpCost(7_200_000, config)).toBe(30);
+  });
+
+  it('still respects the configured minimum', () => {
+    const small = halfGemConfig();
+    expect(speedUpCost(0, small)).toBe(1);
+    expect(speedUpCost(1, small)).toBe(1);
+    expect(speedUpCost(999, small)).toBe(1);
+  });
+
+  it('always returns a safe integer', () => {
+    const small = halfGemConfig();
+    for (let ms = 0; ms <= 4_000; ms += 1) {
+      const gems = speedUpCost(ms, small);
+      expect(Number.isInteger(gems), `${ms} ms produced ${gems}`).toBe(true);
+      expect(Number.isSafeInteger(gems), `${ms} ms produced ${gems}`).toBe(true);
+    }
+    for (let ms = 0; ms <= 700_000_000; ms += 60_000) {
+      expect(Number.isSafeInteger(speedUpCost(ms, config)), `${ms} ms`).toBe(true);
+    }
+  });
+
+  it('keeps the documented behaviour for invalid durations', () => {
+    expect(speedUpCost(Number.NaN, config)).toBe(1);
+    expect(speedUpCost(Number.POSITIVE_INFINITY, config)).toBe(1);
+    expect(speedUpCost(-1, config)).toBe(1);
+    expect(speedUpCost(-1_000_000, config)).toBe(1);
+  });
+
+  it('stays deterministic and pure across repeated calls', () => {
+    const small = halfGemConfig();
+    const first = speedUpCost(2500, small);
+    for (let call = 0; call < 5; call += 1) {
+      expect(speedUpCost(2500, small)).toBe(first);
+    }
+    // Repeated calls do not mutate the config the caller passed in.
+    expect(small.economy.speedUp.anchors).toEqual([
+      { seconds: 1, gems: 1 },
+      { seconds: 3, gems: 2 },
+    ]);
+  });
+});

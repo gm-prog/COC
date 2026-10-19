@@ -9,7 +9,7 @@
 
 import { z } from 'zod';
 import { GRID } from '../config/geometry.js';
-import type { GameConfig } from '../config/types.js';
+import { KEEP_BUILDING_ID, MAX_BUILDERS, type GameConfig } from '../config/types.js';
 import { isValidRect, rectsOverlap, type Rect } from '../grid/index.js';
 
 export class ConfigValidationError extends Error {
@@ -370,8 +370,14 @@ export function checkSemantics(config: GameConfig): string[] {
  * The quantity rules (spec §7.3) are their own table, separate from
  * `requiresKeep`. This checks the table is complete and coherent with the
  * buildings it governs: every building has a row, every row covers every Keep
- * level the Keep definition supports, index 0 is unused, the HQ row never
- * exceeds `maxKeeps`, and no row names a building that does not exist.
+ * level the Keep definition supports, index 0 is unused, every HQ row is
+ * bounded by `maxKeeps`, and no row names a building that does not exist.
+ *
+ * It also pins the HQ identity. The runtime finds the Keep by the literal id
+ * {@link KEEP_BUILDING_ID}, so a config with no HQ, two HQs, or an HQ under a
+ * different name would either bypass the one-Keep rule or produce a state the
+ * rules engine cannot level. All three are rejected here, which is what stops a
+ * second HQ definition (or its count row) from routing around `maxKeeps`.
  */
 export function checkLimits(config: GameConfig): string[] {
   const issues: string[] = [];
@@ -381,10 +387,17 @@ export function checkLimits(config: GameConfig): string[] {
     issues.push(`limits.maxKeeps must be 1 (this phase supports one Keep), received ${maxKeeps}`);
   }
 
-  const keepDef = config.buildings.find((building) => building.category === 'hq');
+  const hqDefs = config.buildings.filter((building) => building.category === 'hq');
+  const keepDef = hqDefs[0];
   const maxKeepLevel = keepDef === undefined ? 0 : keepDef.levels.length;
-  if (keepDef === undefined) {
-    issues.push('config must define exactly one HQ building (category "hq")');
+  if (hqDefs.length !== 1) {
+    issues.push(
+      `config must define exactly one HQ building (category "hq"), found ${hqDefs.length}`,
+    );
+  } else if (keepDef !== undefined && keepDef.id !== KEEP_BUILDING_ID) {
+    issues.push(
+      `the single HQ building must use the canonical id "${KEEP_BUILDING_ID}", got "${keepDef.id}"`,
+    );
   }
 
   for (const building of config.buildings) {
@@ -403,9 +416,9 @@ export function checkLimits(config: GameConfig): string[] {
         `limits.buildingCounts["${building.id}"][0] is unused and must be 0, received ${counts[0]}`,
       );
     }
-    // Only the HQ row is bounded by `maxKeeps`; other rows are counts of
-    // ordinary buildings and are legitimately larger than one.
-    if (building.id === keepDef?.id) {
+    // Every HQ row is bounded by `maxKeeps`; other rows are counts of ordinary
+    // buildings and are legitimately larger than one.
+    if (building.category === 'hq') {
       const aboveCeiling = counts.slice(1).filter((count) => count > maxKeeps);
       if (aboveCeiling.length > 0) {
         issues.push(
@@ -551,6 +564,13 @@ export function checkEconomy(config: GameConfig): string[] {
     );
   }
 
+  // Spec Section 7.5 fixes the ceiling at five builders. Rejecting rather than
+  // clamping keeps a bad balance table visible instead of silently rewriting it.
+  if (builders.maxBuilders > MAX_BUILDERS) {
+    issues.push(
+      `economy.builders.maxBuilders (${builders.maxBuilders}) exceeds the Phase 2 maximum of ${MAX_BUILDERS} builders (spec 7.5)`,
+    );
+  }
   if (builders.maxBuilders < config.starter.builders) {
     issues.push(
       `economy.builders.maxBuilders (${builders.maxBuilders}) is below the starter builder count (${config.starter.builders})`,
