@@ -32,10 +32,15 @@ describe('village entity layout', () => {
     const drawOrder = listVillageEntities(state, GAME_CONFIG);
     const selected = findVillageEntityAtTile(state, GAME_CONFIG, 18, 18);
 
-    expect(drawOrder[drawOrder.length - 1]).toMatchObject({
-      kind: 'building',
-      instance: { type: 'keep' },
-    });
+    const overlappingObstacleIndex = drawOrder.findIndex(
+      (entity) => entity.kind === 'obstacle' && entity.instance.id === 100,
+    );
+    const keepIndex = drawOrder.findIndex(
+      (entity) => entity.kind === 'building' && entity.instance.type === 'keep',
+    );
+
+    expect(overlappingObstacleIndex).toBeGreaterThanOrEqual(0);
+    expect(keepIndex).toBeGreaterThan(overlappingObstacleIndex);
     expect(selected).toMatchObject({
       kind: 'building',
       instance: { type: 'keep' },
