@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   ConfigValidationError,
+  checkEconomy,
+  checkSemantics,
   validateBuildingDefs,
   validateGameConfig,
 } from '../src/validate/index.js';
+// The bounds are shared constants on the package's public surface, so tests read
+// them from the barrel rather than duplicating the numbers.
+import { MAX_SPEED_UP_GEMS, MAX_SPEED_UP_SECONDS } from '../src/index.js';
 import { NOW, TEST_CONFIG } from './fixtures/config.js';
 
 /** Loosely typed on purpose: most of these tests mutate it into invalid shapes. */
@@ -22,10 +27,37 @@ const minimal = (): any => ({
   starter: {
     resources: { gold: 0, essence: 0, shards: 0, gems: 0 },
     builders: 2,
-    buildings: [{ type: 'keep', level: 1, x: 0, y: 0 }],
+    // A 4x4 Keep must sit wholly inside the buildable core, so (0,0) — which
+    // would hang it into the decorative margin — is not a legal starter.
+    buildings: [{ type: 'keep', level: 1, x: 18, y: 18 }],
     obstacles: [],
   },
+  // Cloned: several suites below mutate the economy block, and a shared object
+  // would leak those edits into every later test.
+  economy: JSON.parse(JSON.stringify(ECONOMY)),
+  limits: {
+    maxKeeps: 1,
+    // Long enough for the level-table tests below, which rewrite the Keep's
+    // levels up to level 6.
+    buildingCounts: { keep: [0, 1, 1, 1, 1, 1, 1, 1] },
+  },
 });
+
+/** A valid economy block, shared by the fixtures that need one. */
+const ECONOMY = {
+  speedUp: {
+    anchors: [
+      { seconds: 60, gems: 1 },
+      { seconds: 3600, gems: 20 },
+      { seconds: 86400, gems: 260 },
+      { seconds: 604800, gems: 1000 },
+    ],
+    minimumGems: 1,
+  },
+  builders: { maxBuilders: 5, costs: [{ gems: 250 }, { gems: 500 }, { gems: 1000 }] },
+  cancelRefund: { startedUpgrade: 0, queuedItem: 0.5 },
+  msPerHour: 3_600_000,
+};
 
 const issuesFor = (raw: unknown): string => {
   try {
@@ -274,7 +306,7 @@ describe('validateGameConfig', () => {
     expect(config.obstacles).toEqual([]);
     expect(config.starter.obstacles).toEqual([]);
     // The starter buildings that were written survive untouched.
-    expect(config.starter.buildings).toEqual([{ type: 'keep', level: 1, x: 0, y: 0 }]);
+    expect(config.starter.buildings).toEqual([{ type: 'keep', level: 1, x: 18, y: 18 }]);
   });
 
   it('still requires exactly one Keep once the lists default away', () => {
@@ -338,5 +370,629 @@ describe('validateBuildingDefs', () => {
 
   it('throws on a malformed array', () => {
     expect(() => validateBuildingDefs([{ id: 'x' }])).toThrow(ConfigValidationError);
+  });
+});
+
+describe('economy block', () => {
+  /** The fixture config with its economy block patched. */
+  const withEconomy = (
+    patch: Record<string, unknown>,
+  ): ReturnType<typeof checkEconomy> extends never ? never : any => {
+    const config = JSON.parse(JSON.stringify(TEST_CONFIG)) as typeof TEST_CONFIG;
+    Object.assign(config.economy, patch);
+    return config;
+  };
+
+  const economyIssues = (patch: Record<string, unknown>): string[] =>
+    checkEconomy(withEconomy(patch));
+
+  it('accepts the fixture economy block', () => {
+    expect(economyIssues({})).toEqual([]);
+  });
+
+  it('rejects speed-up anchors that are not strictly ascending', () => {
+    expect(
+      economyIssues({
+        speedUp: {
+          anchors: [
+            { seconds: 3600, gems: 20 },
+            { seconds: 3600, gems: 30 },
+          ],
+          minimumGems: 1,
+        },
+      }),
+    ).toContain(
+      'economy.speedUp.anchors must be strictly ascending by seconds, got 3600 then 3600',
+    );
+  });
+
+  it('rejects speed-up anchors whose gem price decreases', () => {
+    expect(
+      economyIssues({
+        speedUp: {
+          anchors: [
+            { seconds: 60, gems: 30 },
+            { seconds: 3600, gems: 20 },
+          ],
+          minimumGems: 1,
+        },
+      }),
+    ).toContain('economy.speedUp.anchors must be non-decreasing by gems, got 30 then 20');
+  });
+
+  it('rejects a minimum above the cheapest anchor', () => {
+    expect(
+      economyIssues({
+        speedUp: {
+          anchors: [
+            { seconds: 60, gems: 5 },
+            { seconds: 3600, gems: 20 },
+          ],
+          minimumGems: 6,
+        },
+      }),
+    ).toContain('economy.speedUp.minimumGems (6) exceeds the cheapest anchor (5)');
+  });
+
+  it('accepts a minimum equal to the cheapest anchor', () => {
+    expect(
+      economyIssues({
+        speedUp: {
+          anchors: [
+            { seconds: 60, gems: 5 },
+            { seconds: 3600, gems: 20 },
+          ],
+          minimumGems: 5,
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  it('tolerates an anchor list with no first entry', () => {
+    // An empty list is a schema violation, but the semantic check must not crash.
+    expect(() => economyIssues({ speedUp: { anchors: [], minimumGems: 1 } })).not.toThrow();
+  });
+
+  it('rejects a builder maximum below the starter count', () => {
+    expect(economyIssues({ builders: { maxBuilders: 1, costs: [{ gems: 250 }] } })).toContain(
+      'economy.builders.maxBuilders (1) is below the starter builder count (2)',
+    );
+  });
+
+  it('rejects a builder price that is not positive', () => {
+    expect(economyIssues({ builders: { maxBuilders: 5, costs: [{ gems: 0 }] } })).toContain(
+      'economy.builders.costs[0].gems must be positive, received 0',
+    );
+    expect(economyIssues({ builders: { maxBuilders: 5, costs: [{ gems: -5 }] } })).toContain(
+      'economy.builders.costs[0].gems must be positive, received -5',
+    );
+  });
+
+  it('rejects an empty builder price', () => {
+    expect(economyIssues({ builders: { maxBuilders: 5, costs: [{}] } })).toContain(
+      'economy.builders.costs[0] is empty',
+    );
+  });
+
+  it('rejects a refund fraction outside [0, 1]', () => {
+    expect(economyIssues({ cancelRefund: { startedUpgrade: 1.5, queuedItem: 0.5 } })).toContain(
+      'economy.cancelRefund.startedUpgrade must be a fraction in [0, 1], received 1.5',
+    );
+    expect(economyIssues({ cancelRefund: { startedUpgrade: 0, queuedItem: -0.1 } })).toContain(
+      'economy.cancelRefund.queuedItem must be a fraction in [0, 1], received -0.1',
+    );
+  });
+
+  it('rejects a non-finite refund fraction', () => {
+    expect(
+      economyIssues({ cancelRefund: { startedUpgrade: Number.NaN, queuedItem: 0.5 } }),
+    ).toContain('economy.cancelRefund.startedUpgrade must be a fraction in [0, 1], received NaN');
+  });
+
+  it('rejects an msPerHour that is not an hour', () => {
+    expect(economyIssues({ msPerHour: 3_600_001 })).toContain(
+      'economy.msPerHour must be 3,600,000, received 3600001',
+    );
+  });
+
+  it('is reached through validateGameConfig, which reports economy problems', () => {
+    const raw = JSON.parse(JSON.stringify(TEST_CONFIG)) as Record<string, unknown>;
+    (raw.economy as Record<string, unknown>).msPerHour = 1;
+    const issues = issuesFor(raw)
+      .split(' | ')
+      .filter((issue) => issue.length > 0);
+    expect(issues).toContain('economy.msPerHour must be 3,600,000, received 1');
+  });
+
+  it('requires the economy block at all', () => {
+    const raw = minimal();
+    delete (raw as { economy?: unknown }).economy;
+    expect(issuesFor(raw)).toContain('economy');
+  });
+});
+
+describe('collector consistency', () => {
+  const withLevel = (patch: Record<string, unknown>): string[] => {
+    const config = JSON.parse(JSON.stringify(TEST_CONFIG)) as typeof TEST_CONFIG;
+    const mine = config.buildings.find((building) => building.id === 'gold_mine');
+    if (mine === undefined) throw new Error('no gold_mine in the fixture');
+    Object.assign(mine.levels[1]!, patch);
+    return checkSemantics(config);
+  };
+
+  it('accepts a collector that names what it produces', () => {
+    expect(withLevel({ produces: 'gold', productionPerHour: 100, bufferCap: 500 })).toEqual([]);
+  });
+
+  it('rejects production with no declared resource', () => {
+    const issues = withLevel({ produces: undefined, productionPerHour: 100, bufferCap: 500 });
+    expect(issues.some((issue) => issue.includes('does not say which resource'))).toBe(true);
+  });
+
+  it('rejects production with no buffer cap', () => {
+    const issues = withLevel({ produces: 'gold', productionPerHour: 100, bufferCap: undefined });
+    expect(issues.some((issue) => issue.includes('has no bufferCap'))).toBe(true);
+  });
+
+  it('rejects a buffer cap with no declared resource', () => {
+    const issues = withLevel({ produces: undefined, productionPerHour: undefined, bufferCap: 500 });
+    expect(issues.some((issue) => issue.includes('which resource it buffers'))).toBe(true);
+  });
+
+  it('ignores a level that produces nothing', () => {
+    expect(
+      withLevel({ produces: undefined, productionPerHour: undefined, bufferCap: undefined }),
+    ).toEqual([]);
+  });
+});
+
+describe('obstacle identity', () => {
+  it('rejects a duplicated obstacle id', () => {
+    const raw = minimal();
+    raw.obstacles = [
+      { id: 'tree', size: { w: 1, h: 1 }, reward: { gold: 1 }, removalSeconds: 1 },
+      { id: 'tree', size: { w: 1, h: 1 }, reward: { gold: 1 }, removalSeconds: 1 },
+    ];
+    expect(issuesFor(raw)).toContain('duplicate obstacle id "tree"');
+  });
+
+  it('accepts distinct obstacle ids', () => {
+    const raw = minimal();
+    raw.obstacles = [
+      { id: 'tree', size: { w: 1, h: 1 }, reward: { gold: 1 }, removalSeconds: 1 },
+      { id: 'rock', size: { w: 1, h: 1 }, reward: { gold: 1 }, removalSeconds: 1 },
+    ];
+    expect(
+      issuesFor(raw)
+        .split(' | ')
+        .filter((issue) => issue.length > 0),
+    ).toEqual([]);
+  });
+});
+
+describe('quantity limits (validate 7.3)', () => {
+  const withMine = (): any => {
+    const raw = minimal();
+    raw.buildings.push({
+      id: 'gold_mine',
+      category: 'economy',
+      size: { w: 3, h: 3 },
+      unlock: { keepLevel: 1 },
+      levels: [
+        {
+          level: 1,
+          hp: 100,
+          cost: {},
+          buildSeconds: 5,
+          requiresKeep: 1,
+          productionPerHour: 60,
+          bufferCap: 100,
+          produces: 'gold',
+        },
+      ],
+    });
+    raw.limits.buildingCounts.gold_mine = [0, 2];
+    return raw;
+  };
+
+  it('accepts a complete limits table', () => {
+    expect(validateGameConfig(withMine()).limits.maxKeeps).toBe(1);
+  });
+
+  it('rejects a missing row for a defined building', () => {
+    const raw = withMine();
+    delete raw.limits.buildingCounts.gold_mine;
+    expect(issuesFor(raw)).toContain(
+      'limits.buildingCounts is missing an entry for building "gold_mine"',
+    );
+  });
+
+  it('rejects a row that does not cover every Keep level', () => {
+    const raw = minimal();
+    raw.buildings[0].levels.push({ level: 2, hp: 100, cost: {}, buildSeconds: 0, requiresKeep: 1 });
+    raw.limits.buildingCounts.keep = [0, 1];
+    expect(issuesFor(raw)).toContain('must cover Keep levels 1..2');
+  });
+
+  it('rejects a non-zero index 0', () => {
+    const raw = minimal();
+    raw.limits.buildingCounts.keep[0] = 1;
+    expect(issuesFor(raw)).toContain('[0] is unused and must be 0');
+  });
+
+  it('rejects a row for a building that does not exist', () => {
+    const raw = minimal();
+    raw.limits.buildingCounts.ghost = [0, 1];
+    expect(issuesFor(raw)).toContain(
+      'limits.buildingCounts has an entry for unknown building "ghost"',
+    );
+  });
+
+  it('allows a non-HQ row above one but bounds the HQ row by maxKeeps', () => {
+    const raw = withMine();
+    // Two Gold Mines at Keep 1 is legal — that is what the count table means.
+    expect(() => validateGameConfig(raw)).not.toThrow();
+
+    // Two Keeps is not.
+    raw.limits.buildingCounts.keep[1] = 2;
+    expect(issuesFor(raw)).toContain(
+      'limits.buildingCounts["keep"] allows more than limits.maxKeeps (1)',
+    );
+  });
+
+  it('rejects a maxKeeps other than one', () => {
+    const raw = minimal();
+    raw.limits.maxKeeps = 2;
+    expect(issuesFor(raw)).toContain('limits.maxKeeps must be 1');
+  });
+});
+
+describe('starter layout (validate 7.2)', () => {
+  const withMine = (mineX: number, mineY: number): any => {
+    const raw = minimal();
+    raw.buildings.push({
+      id: 'gold_mine',
+      category: 'economy',
+      size: { w: 3, h: 3 },
+      unlock: { keepLevel: 1 },
+      levels: [{ level: 1, hp: 100, cost: {}, buildSeconds: 5, requiresKeep: 1 }],
+    });
+    raw.limits.buildingCounts.gold_mine = [0, 2];
+    raw.starter.buildings.push({ type: 'gold_mine', level: 1, x: mineX, y: mineY });
+    return raw;
+  };
+
+  it('accepts a layout that sits wholly inside the buildable core', () => {
+    expect(() => validateGameConfig(withMine(22, 18))).not.toThrow();
+  });
+
+  it('rejects a footprint that only leaves the core on its far edge', () => {
+    // x + 3 crosses the core end even though x itself is inside it.
+    const raw = withMine(42, 18);
+    expect(issuesFor(raw)).toContain('leaves the 40x40 buildable core');
+  });
+
+  it('rejects a building that overlaps another', () => {
+    const raw = withMine(19, 19);
+    expect(issuesFor(raw)).toContain('overlaps');
+  });
+
+  it('rejects an obstacle outside the map', () => {
+    const raw = minimal();
+    raw.obstacles.push({ id: 'tree', size: { w: 1, h: 1 }, reward: {} });
+    // Obstacles are decorative: they may sit in the margin, but not off the map.
+    raw.starter.obstacles.push({ type: 'tree', x: 48, y: 39 });
+    expect(issuesFor(raw)).toContain('leaves the 48x48 map');
+  });
+
+  it('accepts an obstacle in the decorative margin', () => {
+    const raw = minimal();
+    raw.obstacles.push({ id: 'tree', size: { w: 1, h: 1 }, reward: {} });
+    raw.starter.obstacles.push({ type: 'tree', x: 0, y: 0 });
+    expect(() => validateGameConfig(raw)).not.toThrow();
+  });
+});
+
+describe('builder price list (spec 7.5)', () => {
+  const base = (): any => minimal();
+
+  it('derives its length from maxBuilders minus the starter count', () => {
+    // 5 max, 2 starter -> exactly 3 prices.
+    expect(validateGameConfig(base()).economy.builders.costs).toHaveLength(3);
+
+    const short = base();
+    short.economy.builders.costs.pop();
+    expect(issuesFor(short)).toContain('must contain exactly 3 entries');
+
+    const long = base();
+    long.economy.builders.costs.push({ gems: 2000 });
+    expect(issuesFor(long)).toContain('must contain exactly 3 entries');
+  });
+
+  it('rejects a fractional or non-positive price', () => {
+    const fractional = base();
+    fractional.economy.builders.costs[0] = { gems: 250.5 };
+    // Zod rejects the fraction before the semantic integer check runs.
+    expect(issuesFor(fractional)).toContain('expected int');
+
+    const zero = base();
+    zero.economy.builders.costs[0] = { gems: 0 };
+    expect(issuesFor(zero)).toContain('must be positive');
+
+    const free = base();
+    free.economy.builders.costs[0] = {};
+    expect(issuesFor(free)).toContain('is empty');
+  });
+
+  it('rejects a price paid in anything but gems', () => {
+    const raw = base();
+    raw.economy.builders.costs[0] = { gold: 250 };
+    expect(issuesFor(raw)).toContain('gems');
+  });
+});
+
+describe('economy bounds (D28)', () => {
+  const collector = (bufferCap: number): any => {
+    const raw = minimal();
+    raw.buildings.push({
+      id: 'gold_mine',
+      category: 'economy',
+      size: { w: 3, h: 3 },
+      unlock: { keepLevel: 1 },
+      levels: [
+        {
+          level: 1,
+          hp: 100,
+          cost: {},
+          buildSeconds: 5,
+          requiresKeep: 1,
+          produces: 'gold',
+          productionPerHour: 100,
+          bufferCap,
+        },
+      ],
+    });
+    raw.limits.buildingCounts.gold_mine = [0, 2];
+    return raw;
+  };
+
+  it('accepts a buffer cap of exactly 1,000,000', () => {
+    expect(validateGameConfig(collector(1_000_000)).buildings[1]?.levels[0]?.bufferCap).toBe(
+      1_000_000,
+    );
+  });
+
+  it('rejects a buffer cap one above the bound', () => {
+    expect(issuesFor(collector(1_000_001))).toContain('1000000');
+  });
+
+  it('accepts a production rate of exactly 1,000,000', () => {
+    const raw = collector(100);
+    raw.buildings[1].levels[0].productionPerHour = 1_000_000;
+    expect(() => validateGameConfig(raw)).not.toThrow();
+  });
+
+  it('rejects a production rate one above the bound', () => {
+    const raw = collector(100);
+    raw.buildings[1].levels[0].productionPerHour = 1_000_001;
+    expect(issuesFor(raw)).toContain('1000000');
+  });
+});
+
+describe('starter layout overlaps (validate 7.2)', () => {
+  it('rejects a starter obstacle that overlaps a starter building', () => {
+    const raw = minimal();
+    raw.obstacles.push({ id: 'tree', size: { w: 1, h: 1 }, reward: {} });
+    // The Keep occupies (18,18)-(21,21); the tree sits inside it.
+    raw.starter.obstacles.push({ type: 'tree', x: 19, y: 19 });
+    expect(issuesFor(raw)).toContain('overlaps');
+  });
+
+  it('accepts an obstacle adjacent to a building but not inside it', () => {
+    const raw = minimal();
+    raw.obstacles.push({ id: 'tree', size: { w: 1, h: 1 }, reward: {} });
+    raw.starter.obstacles.push({ type: 'tree', x: 22, y: 18 });
+    expect(() => validateGameConfig(raw)).not.toThrow();
+  });
+});
+
+describe('HQ identity (validate 7.3)', () => {
+  it('accepts exactly one HQ definition carrying the canonical id', () => {
+    expect(validateGameConfig(minimal()).buildings[0]?.id).toBe('keep');
+  });
+
+  it('rejects a config with no HQ definition', () => {
+    const raw = minimal();
+    raw.buildings[0].category = 'misc';
+    const issues = issuesFor(raw);
+    expect(issues).toContain('config must define exactly one HQ building (category "hq"), found 0');
+    // The starter still references it, so the starter rule also fires; neither
+    // rule may be satisfied by simply dropping the category.
+    expect(issues).toContain('starter layout must contain exactly one Keep (found 0)');
+  });
+
+  it('rejects a second HQ definition', () => {
+    const raw = minimal();
+    raw.buildings.push({
+      id: 'fortress',
+      category: 'hq',
+      size: { w: 4, h: 4 },
+      unlock: { keepLevel: 1 },
+      levels: [{ level: 1, hp: 100, cost: {}, buildSeconds: 0, requiresKeep: 1 }],
+    });
+    raw.limits.buildingCounts.fortress = [0, 1];
+    expect(issuesFor(raw)).toContain(
+      'config must define exactly one HQ building (category "hq"), found 2',
+    );
+  });
+
+  it('rejects an HQ whose id is not the canonical keep', () => {
+    const raw = minimal();
+    // Rename consistently: building, count row and starter all point at the
+    // new id, so the only remaining problem is that the runtime looks for
+    // "keep" and would never find this HQ.
+    raw.buildings[0].id = 'stronghold';
+    raw.limits.buildingCounts.stronghold = raw.limits.buildingCounts.keep;
+    delete raw.limits.buildingCounts.keep;
+    raw.starter.buildings[0].type = 'stronghold';
+    expect(issuesFor(raw)).toContain(
+      'the single HQ building must use the canonical id "keep", got "stronghold"',
+    );
+  });
+
+  it('cannot route around maxKeeps through a second HQ row', () => {
+    const raw = minimal();
+    raw.buildings.push({
+      id: 'fortress',
+      category: 'hq',
+      size: { w: 4, h: 4 },
+      unlock: { keepLevel: 1 },
+      levels: [{ level: 1, hp: 100, cost: {}, buildSeconds: 0, requiresKeep: 1 }],
+    });
+    // Two Keeps at Keep 1: both the identity rule and the ceiling rule fire.
+    raw.limits.buildingCounts.fortress = [0, 2];
+    const issues = issuesFor(raw);
+    expect(issues).toContain('found 2');
+    expect(issues).toContain(
+      'limits.buildingCounts["fortress"] allows more than limits.maxKeeps (1) at some Keep level',
+    );
+  });
+
+  it('still bounds the canonical HQ row by maxKeeps', () => {
+    const raw = minimal();
+    raw.limits.buildingCounts.keep[1] = 2;
+    expect(issuesFor(raw)).toContain(
+      'limits.buildingCounts["keep"] allows more than limits.maxKeeps (1) at some Keep level',
+    );
+  });
+});
+
+describe('builder ceiling (spec 7.5)', () => {
+  it('accepts the maximum of five builders', () => {
+    expect(validateGameConfig(minimal()).economy.builders.maxBuilders).toBe(5);
+  });
+
+  it('rejects six builders even when the price list matches', () => {
+    const raw = minimal();
+    raw.economy.builders.maxBuilders = 6;
+    // Lengthened to maxBuilders - starter.builders, so the only remaining
+    // complaint must be the ceiling itself.
+    raw.economy.builders.costs.push({ gems: 2000 });
+    const issues = issuesFor(raw);
+    expect(issues).toContain(
+      'economy.builders.maxBuilders (6) exceeds the Phase 2 maximum of 5 builders (spec 7.5)',
+    );
+    expect(issues).not.toContain('must contain exactly');
+  });
+
+  it('still rejects a maximum below the starter builder count', () => {
+    const raw = minimal();
+    raw.economy.builders.maxBuilders = 1;
+    raw.economy.builders.costs = [{ gems: 250 }];
+    expect(issuesFor(raw)).toContain(
+      'economy.builders.maxBuilders (1) is below the starter builder count (2)',
+    );
+  });
+
+  it('still loads the shipped three-price shop', () => {
+    const raw = minimal();
+    expect(validateGameConfig(raw).economy.builders).toEqual({
+      maxBuilders: 5,
+      costs: [{ gems: 250 }, { gems: 500 }, { gems: 1000 }],
+    });
+  });
+});
+
+describe('speed-up anchor arithmetic bounds (spec 6.4)', () => {
+  const withSpeedUp = (anchors: { seconds: number; gems: number }[], minimumGems = 1): any => {
+    const raw = minimal();
+    raw.economy.speedUp = { anchors, minimumGems };
+    return raw;
+  };
+
+  it('accepts the shipped anchors unchanged', () => {
+    expect(validateGameConfig(minimal()).economy.speedUp.anchors).toEqual([
+      { seconds: 60, gems: 1 },
+      { seconds: 3600, gems: 20 },
+      { seconds: 86400, gems: 260 },
+      { seconds: 604800, gems: 1000 },
+    ]);
+  });
+
+  it('accepts a boundary configuration at both limits', () => {
+    expect(MAX_SPEED_UP_SECONDS * 1000).toBe(9_007_199_254_740_000);
+    expect(Number.isSafeInteger(MAX_SPEED_UP_SECONDS * 1000)).toBe(true);
+
+    const raw = withSpeedUp([
+      { seconds: 1, gems: 1 },
+      { seconds: MAX_SPEED_UP_SECONDS, gems: MAX_SPEED_UP_GEMS },
+    ]);
+    const config = validateGameConfig(raw);
+    expect(config.economy.speedUp.anchors[1]).toEqual({
+      seconds: MAX_SPEED_UP_SECONDS,
+      gems: MAX_SPEED_UP_GEMS,
+    });
+  });
+
+  it('accepts a minimumGems at the safe-integer limit', () => {
+    const raw = withSpeedUp(
+      [
+        { seconds: 1, gems: MAX_SPEED_UP_GEMS },
+        { seconds: 2, gems: MAX_SPEED_UP_GEMS },
+      ],
+      MAX_SPEED_UP_GEMS,
+    );
+    expect(() => validateGameConfig(raw)).not.toThrow();
+  });
+
+  it('rejects one second past the safe millisecond span', () => {
+    expect(Number.isSafeInteger((MAX_SPEED_UP_SECONDS + 1) * 1000)).toBe(false);
+
+    const raw = withSpeedUp([
+      { seconds: 1, gems: 1 },
+      { seconds: MAX_SPEED_UP_SECONDS + 1, gems: 2 },
+    ]);
+    const issues = issuesFor(raw);
+    // The bound is reported by Zod's range check, naming the limit.
+    expect(issues).toContain('9007199254740');
+    expect(issues).toContain('anchors.1.seconds');
+  });
+
+  it('rejects a seconds value far above the finite range', () => {
+    // Number.MAX_VALUE * 1000 === Infinity, which is what made BigInt throw.
+    expect(Number.MAX_VALUE * 1000).toBe(Number.POSITIVE_INFINITY);
+
+    const raw = withSpeedUp([
+      { seconds: 1, gems: 1 },
+      { seconds: Number.MAX_VALUE, gems: 2 },
+    ]);
+    expect(issuesFor(raw)).toContain('anchors.1.seconds');
+  });
+
+  it('rejects an anchor price one past the safe integer', () => {
+    const raw = withSpeedUp([
+      { seconds: 1, gems: 1 },
+      { seconds: 2, gems: MAX_SPEED_UP_GEMS + 1 },
+    ]);
+    expect(issuesFor(raw)).toContain('anchors.1.gems');
+  });
+
+  it('rejects a minimumGems one past the safe integer', () => {
+    const raw = withSpeedUp(
+      [
+        { seconds: 1, gems: 1 },
+        { seconds: 2, gems: 2 },
+      ],
+      MAX_SPEED_UP_GEMS + 1,
+    );
+    expect(issuesFor(raw)).toContain('minimumGems');
+  });
+
+  it('rejects a negative anchor price before the range check', () => {
+    const raw = withSpeedUp([
+      { seconds: 1, gems: -1 },
+      { seconds: 2, gems: 2 },
+    ]);
+    expect(issuesFor(raw)).toContain('anchors.0.gems');
   });
 });

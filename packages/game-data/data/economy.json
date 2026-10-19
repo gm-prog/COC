@@ -1,0 +1,20 @@
+{
+  "speedUp": {
+    "anchors": [
+      { "seconds": 60, "gems": 1 },
+      { "seconds": 3600, "gems": 20 },
+      { "seconds": 86400, "gems": 260 },
+      { "seconds": 604800, "gems": 1000 }
+    ],
+    "minimumGems": 1
+  },
+  "builders": {
+    "maxBuilders": 5,
+    "costs": [{ "gems": 250 }, { "gems": 500 }, { "gems": 1000 }]
+  },
+  "cancelRefund": {
+    "startedUpgrade": 0,
+    "queuedItem": 0.5
+  },
+  "msPerHour": 3600000
+}
