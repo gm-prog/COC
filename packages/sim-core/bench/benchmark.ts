@@ -17,7 +17,7 @@ import starter from '../../game-data/data/starter.json' with { type: 'json' };
 import { applyCommand, type GameCommand } from '../src/commands/index.js';
 import { createRng, deserializeRng, nextUint32, serializeRng } from '../src/rng/index.js';
 import { hashState } from '../src/serialize/index.js';
-import { createNewPlayerState } from '../src/state/index.js';
+import { clonePlayerState, createNewPlayerState, type PlayerState } from '../src/state/index.js';
 import { loadGameConfig } from '../src/validate/index.js';
 
 const config = loadGameConfig({ version: '1.0.0', buildings, obstacles, starter });
@@ -89,11 +89,40 @@ console.log(`commands: hash stable over repeats ${hashes.every((hash) => hash ==
 console.log(`commands: hash                    ${firstHash}`);
 
 // --- State cloning ---------------------------------------------------------
+// A4: this must measure `clonePlayerState`, not `createNewPlayerState` — the
+// latter builds a fresh state from config, which is a different (and much
+// cheaper) operation than deep-copying an existing one.
+const cloneTarget = (): PlayerState => {
+  const base = createNewPlayerState(config, 0);
+  base.buildings.push(
+    { id: 10, type: 'gold_mine', level: 2, x: 26, y: 17 },
+    { id: 11, type: 'gold_store', level: 1, x: 30, y: 17 },
+  );
+  base.obstacles.push({ id: 20, type: 'tree', x: 12, y: 30 });
+  base.builders.busy.push({ buildingId: 10, finishAt: 60_000 });
+  base.trainingQueues.push({
+    barracksId: 12,
+    items: [
+      { troopId: 'axeman', finishAt: 10_000 },
+      { troopId: 'archer', finishAt: 20_000 },
+    ],
+  });
+  return base;
+};
+
+let cloneChecksum = 0;
 timed(`state: ${CLONES.toLocaleString('en-US')} clones`, () => {
-  const state = createNewPlayerState(config, 0);
+  const state = cloneTarget();
+  let last: PlayerState = state;
   for (let i = 0; i < CLONES; i += 1) {
-    // Re-clone the same state; the point is the per-call cost, not the result.
-    void createNewPlayerState(config, 0);
-    void state;
+    // Clone the previous result each round so the work is a genuine deep copy
+    // of a realistic nested state, and consume the result so nothing is
+    // optimised away.
+    last = clonePlayerState(state);
+    cloneChecksum = (cloneChecksum + last.buildings.length + last.builders.busy.length) >>> 0;
   }
+  // A clone must be structurally equal but not the same object.
+  if (last === state) throw new Error('clone returned the input object');
+  if (hashState(last) !== hashState(state)) throw new Error('clone changed the state');
 });
+console.log(`state: clone checksum              ${cloneChecksum.toString().padStart(8)}`);

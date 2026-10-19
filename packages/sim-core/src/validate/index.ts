@@ -223,18 +223,15 @@ function checkSemantics(config: GameConfig): string[] {
     }
     buildingIds.add(building.id);
 
+    // One rule, one message: a level table must be exactly [1, 2, 3, ...].
+    // Checking it as a single predicate catches "starts at 2", "starts at 3",
+    // gaps, duplicates and out-of-order entries without emitting several
+    // overlapping complaints about the same broken table.
     const levels = building.levels.map((level) => level.level);
-    const sorted = [...levels].sort((a, b) => a - b);
-    if (levels.some((level, index) => level !== sorted[index])) {
-      issues.push(`building "${building.id}" has out-of-order levels: [${levels.join(', ')}]`);
-    }
-    for (let i = 1; i < levels.length; i += 1) {
-      if ((levels[i] as number) !== (levels[i - 1] as number) + 1) {
-        issues.push(
-          `building "${building.id}" levels must be contiguous from 1, got [${levels.join(', ')}]`,
-        );
-        break;
-      }
+    if (!levels.every((level, index) => level === index + 1)) {
+      issues.push(
+        `building "${building.id}" levels must start at 1 and be contiguous ascending, got [${levels.join(', ')}]`,
+      );
     }
     for (const level of building.levels) {
       if (

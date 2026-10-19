@@ -10,7 +10,7 @@
 
 import type { BuildingDef, GameConfig, ResourceAmount, ResourceId } from '../config/types.js';
 import { assertValidGeometry, GRID } from '../config/geometry.js';
-import { OccupancyGrid, type Rect } from '../grid/index.js';
+import { isValidRect, OccupancyGrid, type Rect } from '../grid/index.js';
 import {
   clonePlayerState,
   highestEntityId,
@@ -21,11 +21,13 @@ import {
 export type CommandErrorCode =
   | 'invalid_command'
   | 'invalid_config'
+  | 'invalid_state'
   | 'unknown_building'
   | 'unknown_obstacle'
   | 'not_found'
   | 'out_of_bounds'
   | 'margin'
+  | 'invalid_rect'
   | 'overlapping'
   | 'keep_level_too_low'
   | 'no_change';
@@ -102,6 +104,37 @@ function invalid(message: string, details?: Record<string, unknown>): CommandRes
   return fail({ code: 'invalid_command', message, details });
 }
 
+/**
+ * TypeScript types do not validate runtime data. A command payload arrives over
+ * the wire (or from a tampered client), so every coordinate is checked here
+ * rather than trusted: `NaN`, `±Infinity`, `undefined`, strings and fractions
+ * are all rejected before any grid arithmetic runs.
+ */
+function requireTileCoordinate(value: unknown, field: string): CommandResult | number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    return invalid(
+      `payload.${field} must be an integer tile coordinate, received ${describe(value)}`,
+      { field, received: typeof value },
+    );
+  }
+  return value;
+}
+
+/** Renders a runtime value for an error message without trusting its type. */
+function describe(value: unknown): string {
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
+    return String(value);
+  }
+  if (value === undefined) return 'undefined';
+  return typeof value;
+}
+
+function requireObject(value: unknown, label: string): CommandResult | null {
+  if (value === null || typeof value !== 'object') return invalid(`${label} must be an object`);
+  return null;
+}
+
 /** Applies one command. Pure: the input state is never modified. */
 export function applyCommand(
   state: PlayerState,
@@ -137,7 +170,18 @@ function placeBuilding(
   payload: PlaceBuildingPayload,
   ctx: CommandContext,
 ): CommandResult {
-  if (payload === null || typeof payload !== 'object') return invalid('payload must be an object');
+  const badPayload = requireObject(payload, 'payload');
+  if (badPayload) return badPayload;
+  if (typeof payload.buildingType !== 'string' || payload.buildingType.length === 0) {
+    return invalid(
+      `payload.buildingType must be a non-empty string, received ${describe(payload.buildingType)}`,
+    );
+  }
+
+  const x = requireTileCoordinate(payload.x, 'x');
+  if (typeof x !== 'number') return x;
+  const y = requireTileCoordinate(payload.y, 'y');
+  if (typeof y !== 'number') return y;
 
   const def = ctx.config.buildings.find((candidate) => candidate.id === payload.buildingType);
   if (!def) {
@@ -148,7 +192,7 @@ function placeBuilding(
     });
   }
 
-  const rect = footprint(def, payload.x, payload.y);
+  const rect = footprint(def, x, y);
   const conflict = checkPlacement(state, def, rect, ctx);
   if (conflict) return conflict;
 
@@ -157,8 +201,8 @@ function placeBuilding(
     id: highestEntityId(next) + 1,
     type: def.id,
     level: 1,
-    x: payload.x,
-    y: payload.y,
+    x,
+    y,
   };
   next.buildings.push(building);
   if (def.category === 'hq') next.keepLevel = building.level;
@@ -183,7 +227,18 @@ function moveBuilding(
   payload: MoveBuildingPayload,
   ctx: CommandContext,
 ): CommandResult {
-  if (payload === null || typeof payload !== 'object') return invalid('payload must be an object');
+  const badPayload = requireObject(payload, 'payload');
+  if (badPayload) return badPayload;
+  if (typeof payload.buildingId !== 'number' || !Number.isInteger(payload.buildingId)) {
+    return invalid(
+      `payload.buildingId must be an integer, received ${describe(payload.buildingId)}`,
+    );
+  }
+
+  const x = requireTileCoordinate(payload.x, 'x');
+  if (typeof x !== 'number') return x;
+  const y = requireTileCoordinate(payload.y, 'y');
+  if (typeof y !== 'number') return y;
 
   const building = state.buildings.find((candidate) => candidate.id === payload.buildingId);
   if (!building) {
@@ -202,11 +257,14 @@ function moveBuilding(
     });
   }
 
-  const target = footprint(def, payload.x, payload.y);
+  const target = footprint(def, x, y);
 
   // Free the building's own footprint first so a building can be "moved" onto
   // its current position (a legal no-op) without tripping the overlap check.
+  // buildGrid has already proved every entity's rectangle is well-formed, so
+  // the building's own footprint is safe to clear without re-checking.
   const grid = buildGrid(state, ctx.config);
+  if ('code' in grid) return fail(grid);
   grid.clear({ x: building.x, y: building.y, w: def.size.w, h: def.size.h }, building.id);
 
   const conflict = checkPlacement(state, def, target, ctx, grid);
@@ -218,8 +276,8 @@ function moveBuilding(
   if (!moved) {
     return fail({ code: 'not_found', message: `no building with id ${payload.buildingId}` });
   }
-  moved.x = payload.x;
-  moved.y = payload.y;
+  moved.x = x;
+  moved.y = y;
   next.lastSyncAt = ctx.now;
 
   return ok(next, [
@@ -240,7 +298,13 @@ function removeObstacle(
   payload: RemoveObstaclePayload,
   ctx: CommandContext,
 ): CommandResult {
-  if (payload === null || typeof payload !== 'object') return invalid('payload must be an object');
+  const badPayload = requireObject(payload, 'payload');
+  if (badPayload) return badPayload;
+  if (typeof payload.obstacleId !== 'number' || !Number.isInteger(payload.obstacleId)) {
+    return invalid(
+      `payload.obstacleId must be an integer, received ${describe(payload.obstacleId)}`,
+    );
+  }
 
   const obstacle = state.obstacles.find((candidate) => candidate.id === payload.obstacleId);
   if (!obstacle) {
@@ -292,30 +356,59 @@ function footprint(def: BuildingDef, x: number, y: number): Rect {
   return { x, y, w: def.size.w, h: def.size.h };
 }
 
-function buildGrid(state: PlayerState, config: GameConfig): OccupancyGrid {
+/**
+ * Rebuilds the occupancy map from a state snapshot.
+ *
+ * Every entity's definition and geometry is resolved from the *validated*
+ * config. A missing definition or a malformed instance is a state/config
+ * mismatch, which is reported as a typed error rather than silently shrunk to a
+ * 1×1 footprint: a phantom size would let an unknown entity be treated as a
+ * legal placement and would make the grid disagree with what is on screen.
+ */
+function buildGrid(state: PlayerState, config: GameConfig): OccupancyGrid | CommandError {
   assertValidGeometry(GRID);
-  const entries = [
-    ...state.buildings.map((building) => {
-      const def = config.buildings.find((candidate) => candidate.id === building.type);
+  const entries: { id: number; x: number; y: number; w: number; h: number }[] = [];
+
+  for (const building of state.buildings) {
+    const def = config.buildings.find((candidate) => candidate.id === building.type);
+    if (!def) {
       return {
-        id: building.id,
-        x: building.x,
-        y: building.y,
-        w: def?.size.w ?? 1,
-        h: def?.size.h ?? 1,
+        code: 'unknown_building',
+        message: `building ${building.id} has unknown type "${building.type}"`,
+        details: { buildingId: building.id, buildingType: building.type },
       };
-    }),
-    ...state.obstacles.map((obstacle) => {
-      const def = config.obstacles.find((candidate) => candidate.id === obstacle.type);
+    }
+    const rect = { x: building.x, y: building.y, w: def.size.w, h: def.size.h };
+    if (!isValidRect(rect)) {
       return {
-        id: obstacle.id,
-        x: obstacle.x,
-        y: obstacle.y,
-        w: def?.size.w ?? 1,
-        h: def?.size.h ?? 1,
+        code: 'invalid_state',
+        message: `building ${building.id} has a malformed position or footprint`,
+        details: { buildingId: building.id, rect },
       };
-    }),
-  ];
+    }
+    entries.push({ id: building.id, ...rect });
+  }
+
+  for (const obstacle of state.obstacles) {
+    const def = config.obstacles.find((candidate) => candidate.id === obstacle.type);
+    if (!def) {
+      return {
+        code: 'unknown_obstacle',
+        message: `obstacle ${obstacle.id} has unknown type "${obstacle.type}"`,
+        details: { obstacleId: obstacle.id, obstacleType: obstacle.type },
+      };
+    }
+    const rect = { x: obstacle.x, y: obstacle.y, w: def.size.w, h: def.size.h };
+    if (!isValidRect(rect)) {
+      return {
+        code: 'invalid_state',
+        message: `obstacle ${obstacle.id} has a malformed position or footprint`,
+        details: { obstacleId: obstacle.id, rect },
+      };
+    }
+    entries.push({ id: obstacle.id, ...rect });
+  }
+
   return OccupancyGrid.fromEntries(GRID, entries);
 }
 
@@ -332,8 +425,18 @@ function checkPlacement(
   ctx: CommandContext,
   grid?: OccupancyGrid,
 ): CommandResult | null {
-  const occupancy = grid ?? buildGrid(state, ctx.config);
+  const built = grid ?? buildGrid(state, ctx.config);
+  if ('code' in built) return fail(built);
+  const occupancy = built;
   const conflict = occupancy.findConflict(rect);
+
+  if (conflict?.reason === 'invalid_rect') {
+    return fail({
+      code: 'invalid_rect',
+      message: `"${def.id}" needs a finite integer position and a positive integer footprint`,
+      details: { rect },
+    });
+  }
 
   if (conflict?.reason === 'out_of_bounds') {
     return fail({

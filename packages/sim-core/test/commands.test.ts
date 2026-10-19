@@ -431,8 +431,7 @@ describe('state that no longer matches the config', () => {
     expect(error.message).toContain('tree');
   });
 
-  it('treats a building with an unknown footprint as 1x1 when building the grid', () => {
-    // A state saved under an older config still has to be placeable-checkable.
+  it('still places against a state whose other buildings are all known', () => {
     const stale = newState();
     stale.buildings = stale.buildings.filter((b) => b.type === 'keep');
     const result = expectOk(
@@ -443,5 +442,287 @@ describe('state that no longer matches the config', () => {
       ),
     );
     expect(result.state.buildings.at(-1)).toMatchObject({ type: 'wall', x: 14, y: 17 });
+  });
+
+  // --- A5 regression: no silent 1x1 fallback -------------------------------
+  // An entity whose definition is missing from the config used to be rebuilt
+  // into the grid as 1x1 (`def?.size.w ?? 1`). That let an unknown entity be
+  // treated as a legal placement and made the grid disagree with the config.
+  it('rejects a state containing a building type the config does not define', () => {
+    const stale = newState();
+    stale.buildings = [...stale.buildings, { id: 99, type: 'ghost_factory', level: 1, x: 6, y: 6 }];
+
+    for (const cmd of [
+      command({ type: 'PlaceBuilding', payload: { buildingType: 'wall', x: 30, y: 30 } }),
+      command({ type: 'MoveBuilding', payload: { buildingId: 1, x: 30, y: 30 } }),
+    ] as const) {
+      const error = expectError(applyCommand(stale, cmd, ctx));
+      expect(error.code).toBe('unknown_building');
+      expect(error.message).toContain('ghost_factory');
+      expect(error.details).toMatchObject({ buildingId: 99, buildingType: 'ghost_factory' });
+    }
+  });
+
+  it('never accepts an unknown building as a legal 1x1 entity', () => {
+    const stale = newState();
+    stale.buildings = [{ id: 1, type: 'keep', level: 1, x: 18, y: 18 }];
+    // The ghost sits exactly where the wall wants to go. If it were still
+    // treated as 1x1 the placement would be rejected as an overlap; either way
+    // it must not be silently accepted.
+    stale.buildings.push({ id: 2, type: 'ghost_factory', level: 1, x: 30, y: 30 });
+    const result = applyCommand(
+      stale,
+      command({ type: 'PlaceBuilding', payload: { buildingType: 'wall', x: 30, y: 30 } }),
+      ctx,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('unknown_building');
+  });
+
+  it('rejects a state containing an obstacle type the config does not define', () => {
+    const stale = newState();
+    stale.obstacles = [...stale.obstacles, { id: 77, type: 'ufo', x: 12, y: 12 }];
+    const error = expectError(
+      applyCommand(
+        stale,
+        command({ type: 'PlaceBuilding', payload: { buildingType: 'wall', x: 30, y: 30 } }),
+        ctx,
+      ),
+    );
+    expect(error.code).toBe('unknown_obstacle');
+    expect(error.message).toContain('ufo');
+    expect(error.details).toMatchObject({ obstacleId: 77, obstacleType: 'ufo' });
+  });
+
+  it('rejects a state whose entity position or footprint is malformed', () => {
+    const stale = newState();
+    stale.buildings = [{ id: 1, type: 'keep', level: 1, x: Number.NaN, y: 18 }];
+    const error = expectError(
+      applyCommand(
+        stale,
+        command({ type: 'PlaceBuilding', payload: { buildingType: 'wall', x: 30, y: 30 } }),
+        ctx,
+      ),
+    );
+    expect(error.code).toBe('invalid_state');
+    expect(error.message).toContain('malformed');
+  });
+});
+
+// --- A2 regression: malformed runtime payloads ----------------------------
+// TypeScript types do not validate external data. These arrive over the wire,
+// so every coordinate is checked before any grid arithmetic runs.
+describe('malformed placement payloads', () => {
+  const badCoordinates: Record<string, unknown> = {
+    NaN: Number.NaN,
+    Infinity: Number.POSITIVE_INFINITY,
+    '-Infinity': Number.NEGATIVE_INFINITY,
+    undefined: undefined,
+    string: '30',
+    fractional: 30.5,
+    negativeFraction: -0.5,
+    null: null,
+    object: {},
+    boolean: true,
+  };
+
+  for (const [label, value] of Object.entries(badCoordinates)) {
+    it(`rejects PlaceBuilding with ${label} x`, () => {
+      const error = expectError(
+        applyCommand(
+          newState(),
+          command({
+            type: 'PlaceBuilding',
+            payload: { buildingType: 'wall', x: value as number, y: 30 },
+          }),
+          ctx,
+        ),
+      );
+      expect(error.code).toBe('invalid_command');
+      expect(error.message).toContain('payload.x');
+    });
+
+    it(`rejects PlaceBuilding with ${label} y`, () => {
+      const error = expectError(
+        applyCommand(
+          newState(),
+          command({
+            type: 'PlaceBuilding',
+            payload: { buildingType: 'wall', x: 30, y: value as number },
+          }),
+          ctx,
+        ),
+      );
+      expect(error.code).toBe('invalid_command');
+      expect(error.message).toContain('payload.y');
+    });
+
+    it(`rejects MoveBuilding with ${label} x`, () => {
+      const error = expectError(
+        applyCommand(
+          newState(),
+          command({ type: 'MoveBuilding', payload: { buildingId: 1, x: value as number, y: 30 } }),
+          ctx,
+        ),
+      );
+      expect(error.code).toBe('invalid_command');
+      expect(error.message).toContain('payload.x');
+    });
+  }
+
+  it('rejects a missing buildingType', () => {
+    const error = expectError(
+      applyCommand(
+        newState(),
+        command({ type: 'PlaceBuilding', payload: { x: 30, y: 30 } as never }),
+        ctx,
+      ),
+    );
+    expect(error.code).toBe('invalid_command');
+    expect(error.message).toContain('payload.buildingType');
+  });
+
+  it('rejects a non-integer buildingId and obstacleId', () => {
+    for (const cmd of [
+      command({ type: 'MoveBuilding', payload: { buildingId: 1.5, x: 30, y: 30 } }),
+      command({ type: 'MoveBuilding', payload: { buildingId: Number.NaN, x: 30, y: 30 } }),
+      command({ type: 'RemoveObstacle', payload: { obstacleId: '3' as never } }),
+      command({ type: 'RemoveObstacle', payload: { obstacleId: undefined as never } }),
+    ] as const) {
+      const error = expectError(applyCommand(newState(), cmd, ctx));
+      expect(error.code).toBe('invalid_command');
+    }
+  });
+
+  it('rejects a non-object payload', () => {
+    for (const cmd of [
+      command({ type: 'PlaceBuilding', payload: null as never }),
+      command({ type: 'MoveBuilding', payload: 7 as never }),
+      command({ type: 'RemoveObstacle', payload: 'x' as never }),
+    ] as const) {
+      expect(applyCommand(newState(), cmd, ctx).ok).toBe(false);
+    }
+  });
+
+  it('leaves the input state untouched for every malformed payload', () => {
+    const before = newState();
+    const snapshot = hashState(before);
+    for (const cmd of [
+      command({ type: 'PlaceBuilding', payload: { buildingType: 'wall', x: Number.NaN, y: 30 } }),
+      command({ type: 'MoveBuilding', payload: { buildingId: 1, x: 30.5, y: 30 } }),
+      command({ type: 'RemoveObstacle', payload: { obstacleId: Number.NaN } }),
+      command({ type: 'PlaceBuilding', payload: { buildingType: 'ghost', x: 30, y: 30 } }),
+    ] as const) {
+      const result = applyCommand(before, cmd, ctx);
+      expect(result.ok).toBe(false);
+      expect(hashState(before)).toBe(snapshot);
+    }
+  });
+
+  it('still rejects out-of-bounds, margin, overlap and exact-fit edges', () => {
+    // The invalid_rect guard must not have disturbed the ordering for valid rects.
+    const cases = [
+      { payload: { buildingType: 'wall', x: 30, y: 48 }, code: 'out_of_bounds' },
+      { payload: { buildingType: 'wall', x: 3, y: 30 }, code: 'margin' },
+      { payload: { buildingType: 'wall', x: 14, y: 17 }, code: 'overlapping' },
+      { payload: { buildingType: 'wall', x: 48, y: 30 }, code: 'out_of_bounds' },
+      { payload: { buildingType: 'wall', x: 30, y: 44 }, code: 'margin' },
+    ] as const;
+    for (const { payload, code } of cases) {
+      expect(
+        expectError(applyCommand(newState(), command({ type: 'PlaceBuilding', payload }), ctx))
+          .code,
+      ).toBe(code);
+    }
+  });
+
+  it('still accepts an exact-fit footprint in the buildable corner', () => {
+    // A 3x3 filling the last three buildable tiles: bounds, margin and
+    // occupancy all pass. This is the exact-fit edge the invalid_rect guard
+    // must not have broken.
+    const result = expectOk(
+      applyCommand(
+        newState(),
+        command({ type: 'PlaceBuilding', payload: { buildingType: 'gold_mine', x: 41, y: 41 } }),
+        ctx,
+      ),
+    );
+    expect(result.state.buildings.at(-1)).toMatchObject({ x: 41, y: 41 });
+  });
+
+  it('still allows moving a building onto its own current footprint', () => {
+    const result = expectOk(
+      applyCommand(
+        newState(),
+        command({ type: 'MoveBuilding', payload: { buildingId: 2, x: 14, y: 17 } }),
+        ctx,
+      ),
+    );
+    expect(result.state.buildings.find((b) => b.id === 2)).toMatchObject({ x: 14, y: 17 });
+    expect(result.events).toEqual([
+      {
+        type: 'BuildingMoved',
+        buildingId: 2,
+        buildingType: 'gold_mine',
+        from: { x: 14, y: 17 },
+        to: { x: 14, y: 17 },
+      },
+    ]);
+  });
+});
+
+// --- A2 regression: defense at the config/state boundary -------------------
+// `GameConfig` is a structural type, so a caller can hand applyCommand an
+// object that type-checks but was never produced by validateGameConfig. These
+// tests prove the boundary guards fire instead of treating a nonsense
+// footprint as "free".
+describe('malformed config and state at the grid boundary', () => {
+  const withBadSize = (): CommandContext => {
+    const config = JSON.parse(JSON.stringify(TEST_CONFIG)) as typeof TEST_CONFIG;
+    const wall = config.buildings.find((b) => b.id === 'wall');
+    if (wall) wall.size = { w: Number.NaN, h: 1 };
+    return { config, now: NOW };
+  };
+
+  const withBadObstaclePosition = (): PlayerState => {
+    const state = newState();
+    state.obstacles = [{ id: 3, type: 'tree', x: Number.NaN, y: 10 }];
+    return state;
+  };
+
+  it('reports invalid_rect when the config supplies a malformed footprint', () => {
+    const error = expectError(
+      applyCommand(
+        newState(),
+        command({ type: 'PlaceBuilding', payload: { buildingType: 'wall', x: 30, y: 30 } }),
+        withBadSize(),
+      ),
+    );
+    expect(error.code).toBe('invalid_rect');
+    expect(error.message).toContain('positive integer footprint');
+  });
+
+  it('reports invalid_state when an obstacle has a malformed position', () => {
+    const error = expectError(
+      applyCommand(
+        withBadObstaclePosition(),
+        command({ type: 'PlaceBuilding', payload: { buildingType: 'wall', x: 30, y: 30 } }),
+        ctx,
+      ),
+    );
+    expect(error.code).toBe('invalid_state');
+    expect(error.message).toContain('obstacle 3');
+  });
+
+  it('leaves the input state untouched when the boundary guard fires', () => {
+    const before = withBadObstaclePosition();
+    const snapshot = hashState(before);
+    const result = applyCommand(
+      before,
+      command({ type: 'PlaceBuilding', payload: { buildingType: 'wall', x: 30, y: 30 } }),
+      ctx,
+    );
+    expect(result.ok).toBe(false);
+    expect(hashState(before)).toBe(snapshot);
   });
 });

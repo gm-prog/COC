@@ -7,7 +7,7 @@
  * cheap to rebuild from a state snapshot.
  */
 
-import type { GridGeometry } from '../config/geometry.js';
+import { assertValidGeometry, type GridGeometry } from '../config/geometry.js';
 
 export interface Rect {
   x: number;
@@ -16,12 +16,36 @@ export interface Rect {
   h: number;
 }
 
+export type CellConflictReason =
+  /** The rectangle itself is malformed; checked before anything else. */
+  'invalid_rect' | 'out_of_bounds' | 'margin' | 'occupied';
+
 export interface CellConflict {
   x: number;
   y: number;
   /** Id of the entity already occupying the cell, or 0 when the cell is outside the buildable core. */
   owner: number;
-  reason: 'out_of_bounds' | 'margin' | 'occupied';
+  reason: CellConflictReason;
+}
+
+/**
+ * True when a rectangle is well-formed: a finite integer origin and a finite
+ * positive integer size.
+ *
+ * `Number.isInteger` already rejects `NaN`, `±Infinity`, `undefined`, strings
+ * and fractions, so this single predicate covers every malformed payload. It
+ * matters because a loop over `{ x: NaN, w: 3 }` runs zero times and would
+ * otherwise report "no conflict" for a rectangle that is not a rectangle.
+ */
+export function isValidRect(rect: Rect): boolean {
+  return (
+    Number.isInteger(rect.x) &&
+    Number.isInteger(rect.y) &&
+    Number.isInteger(rect.w) &&
+    Number.isInteger(rect.h) &&
+    rect.w > 0 &&
+    rect.h > 0
+  );
 }
 
 /** Axis-aligned rectangle overlap test (touching edges do not overlap). */
@@ -47,6 +71,7 @@ export class OccupancyGrid {
   private occupiedCount = 0;
 
   constructor(geometry: GridGeometry) {
+    assertValidGeometry(geometry);
     this.geometry = geometry;
     this.width = geometry.total;
     this.height = geometry.total;
@@ -60,7 +85,13 @@ export class OccupancyGrid {
   ): OccupancyGrid {
     const grid = new OccupancyGrid(geometry);
     for (const entry of entries) {
-      grid.fill({ x: entry.x, y: entry.y, w: entry.w, h: entry.h }, entry.id);
+      const rect = { x: entry.x, y: entry.y, w: entry.w, h: entry.h };
+      if (!isValidRect(rect)) {
+        throw new RangeError(
+          `OccupancyGrid.fromEntries: entity ${entry.id} has a malformed rectangle ${JSON.stringify(rect)}`,
+        );
+      }
+      grid.fill(rect, entry.id);
     }
     return grid;
   }
@@ -92,8 +123,9 @@ export class OccupancyGrid {
     );
   }
 
-  /** True when every cell of the rectangle is empty. */
+  /** True when every cell of the rectangle is empty. Never true for a malformed rect. */
   isFree(rect: Rect): boolean {
+    if (!isValidRect(rect)) return false;
     for (let y = rect.y; y < rect.y + rect.h; y += 1) {
       for (let x = rect.x; x < rect.x + rect.w; x += 1) {
         if (!this.isInsideMap(x, y)) return false;
@@ -108,6 +140,10 @@ export class OccupancyGrid {
    * Ordering matters for error messages: bounds, then margin, then occupancy.
    */
   findConflict(rect: Rect): CellConflict | null {
+    // A malformed rectangle cannot be bounds-checked meaningfully, so it is
+    // rejected first and reported with its own coordinates.
+    if (!isValidRect(rect)) return { x: rect.x, y: rect.y, owner: 0, reason: 'invalid_rect' };
+
     for (let y = rect.y; y < rect.y + rect.h; y += 1) {
       for (let x = rect.x; x < rect.x + rect.w; x += 1) {
         if (!this.isInsideMap(x, y)) return { x, y, owner: 0, reason: 'out_of_bounds' };
@@ -143,6 +179,11 @@ export class OccupancyGrid {
 
   /** Marks every cell of the rectangle as owned by `id`. */
   fill(rect: Rect, id: number): void {
+    if (!isValidRect(rect)) {
+      throw new RangeError(
+        `OccupancyGrid.fill: rectangle must have finite integer origin and positive integer size, received ${JSON.stringify(rect)}`,
+      );
+    }
     if (!Number.isInteger(id) || id <= 0) {
       throw new RangeError(`OccupancyGrid.fill: owner id must be a positive integer, got ${id}`);
     }
@@ -160,6 +201,11 @@ export class OccupancyGrid {
 
   /** Clears the rectangle. Pass `expectedOwner` to assert ownership first. */
   clear(rect: Rect, expectedOwner?: number): void {
+    if (!isValidRect(rect)) {
+      throw new RangeError(
+        `OccupancyGrid.clear: rectangle must have finite integer origin and positive integer size, received ${JSON.stringify(rect)}`,
+      );
+    }
     for (let y = rect.y; y < rect.y + rect.h; y += 1) {
       for (let x = rect.x; x < rect.x + rect.w; x += 1) {
         if (!this.isInsideMap(x, y)) continue;
@@ -177,8 +223,9 @@ export class OccupancyGrid {
     }
   }
 
-  /** Visits every cell of a rectangle in row-major order. */
+  /** Visits every cell of a rectangle in row-major order. No-op for a malformed rect. */
   forEachCell(rect: Rect, visit: (x: number, y: number, owner: number) => void): void {
+    if (!isValidRect(rect)) return;
     for (let y = rect.y; y < rect.y + rect.h; y += 1) {
       for (let x = rect.x; x < rect.x + rect.w; x += 1) {
         if (!this.isInsideMap(x, y)) continue;

@@ -9,6 +9,7 @@ import {
   nextPick,
   nextUint32,
   serializeRng,
+  type RngState,
 } from '../src/rng/index.js';
 
 const DRAWS = 1_000_000;
@@ -147,26 +148,61 @@ describe('nextInt bounds', () => {
 });
 
 describe('serialization round-trip', () => {
-  it('restores a state whose internal counter has wrapped past zero', () => {
-    // Drive the generator until the internal state is negative under the old
-    // `| 0` convention, then prove the round-trip is still exact.
+  it('restores the exact state captured when the high bit is set', () => {
+    // --- A3 regression ---------------------------------------------------
+    // The old version of this test only *observed* a high-bit state somewhere
+    // in the loop and then serialized whatever the final state happened to be,
+    // so it never proved that the high-bit state itself round-trips. Capture
+    // the snapshot at the moment the high bit is set instead.
     let rng = createRng(0xdeadbeef);
-    let sawWrapped = false;
-    for (let i = 0; i < 5000; i += 1) {
+    let snapshot: RngState | undefined;
+    for (let i = 0; i < 100_000 && snapshot === undefined; i += 1) {
       const [, next] = nextUint32(rng);
-      if (next.state > 0x7fffffff) sawWrapped = true;
+      if (next.state > 0x7fffffff) snapshot = next;
       rng = next;
     }
-    expect(sawWrapped).toBe(true);
+    expect(snapshot, 'the generator must reach a state with the high bit set').toBeDefined();
 
-    const serialized = serializeRng(rng);
+    const captured = snapshot as RngState;
+    expect(captured.state > 0x7fffffff).toBe(true);
+    const serialized = serializeRng(captured);
     const restored = deserializeRng(serialized);
+
+    // The state must come back *exactly*, not merely as a valid generator.
+    expect(restored.state).toBe(captured.state);
+    expect(restored.seed).toBe(captured.seed);
     expect(serializeRng(restored)).toBe(serialized);
 
-    // ...and the resumed stream matches the uninterrupted one.
-    const [a] = nextUint32(rng);
-    const [b] = nextUint32(restored);
-    expect(b).toBe(a);
+    // ...and the resumed stream must match the uninterrupted one for several
+    // draws, so a single lucky value cannot carry the assertion.
+    let originalCursor = captured;
+    let resumedCursor = restored;
+    for (let i = 0; i < 5; i += 1) {
+      const [expected, expectedNext] = nextUint32(originalCursor);
+      const [actual, actualNext] = nextUint32(resumedCursor);
+      expect(actual).toBe(expected);
+      expect(actualNext.state).toBe(expectedNext.state);
+      originalCursor = expectedNext;
+      resumedCursor = actualNext;
+    }
+  });
+
+  it('round-trips every high-bit state in a long run, not just the first', () => {
+    let rng = createRng(0x0badf00d);
+    let highBitCount = 0;
+    for (let i = 0; i < 20_000; i += 1) {
+      const [, next] = nextUint32(rng);
+      if (next.state > 0x7fffffff) {
+        highBitCount += 1;
+        const restored = deserializeRng(serializeRng(next));
+        expect(restored.state).toBe(next.state);
+        expect(nextUint32(restored)[0]).toBe(nextUint32(next)[0]);
+      }
+      rng = next;
+    }
+    // Roughly half of all states should have the high bit set; if this is tiny
+    // the test has stopped exercising the regression.
+    expect(highBitCount).toBeGreaterThan(1000);
   });
 
   it('round-trips every step of a long run', () => {

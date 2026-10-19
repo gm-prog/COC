@@ -127,7 +127,77 @@ describe('validateGameConfig', () => {
       { level: 2, hp: 100, cost: {}, buildSeconds: 0, requiresKeep: 1 },
       { level: 1, hp: 100, cost: {}, buildSeconds: 0, requiresKeep: 1 },
     ];
-    expect(issuesFor(raw)).toContain('out-of-order');
+    expect(issuesFor(raw)).toContain('contiguous');
+  });
+
+  // --- A1 regression: a level table must begin at level 1 -------------------
+  // A table that merely happens to be contiguous — [2] or [2, 3] — used to pass
+  // every check, which made level 1 unreachable and every later level's cost
+  // index wrong. The single rule below replaces the two weaker ones.
+  const badTable = (levels: number[]): string[] => {
+    const raw = minimal();
+    raw.buildings[0]!.levels = levels.map((level) => ({
+      level,
+      hp: 100,
+      cost: {},
+      buildSeconds: 0,
+      requiresKeep: 1,
+    }));
+    return issuesFor(raw)
+      .split(' | ')
+      .filter((issue) => issue.length > 0);
+  };
+
+  it('rejects a single-level table that starts at 2', () => {
+    const issues = badTable([2]);
+    expect(issues).toContain(
+      'building "keep" levels must start at 1 and be contiguous ascending, got [2]',
+    );
+  });
+
+  it('rejects a contiguous table that starts at 2', () => {
+    const issues = badTable([2, 3]);
+    expect(issues).toContain(
+      'building "keep" levels must start at 1 and be contiguous ascending, got [2, 3]',
+    );
+  });
+
+  it('rejects a table that starts at 3', () => {
+    expect(badTable([3, 4, 5])).toContain(
+      'building "keep" levels must start at 1 and be contiguous ascending, got [3, 4, 5]',
+    );
+  });
+
+  it('rejects duplicate levels', () => {
+    expect(badTable([1, 1, 2])).toContain(
+      'building "keep" levels must start at 1 and be contiguous ascending, got [1, 1, 2]',
+    );
+  });
+
+  it('names the building and the supplied sequence in the message', () => {
+    const raw = minimal();
+    raw.buildings[0]!.id = 'gold_mine';
+    raw.starter.buildings[0]!.type = 'gold_mine';
+    raw.buildings[0]!.levels = [
+      { level: 2, hp: 100, cost: {}, buildSeconds: 0, requiresKeep: 1 },
+      { level: 4, hp: 100, cost: {}, buildSeconds: 0, requiresKeep: 1 },
+    ];
+    expect(issuesFor(raw)).toContain(
+      'building "gold_mine" levels must start at 1 and be contiguous ascending, got [2, 4]',
+    );
+  });
+
+  it('reports exactly one level complaint per broken table', () => {
+    // The old out-of-order and contiguity checks could both fire for the same
+    // table, doubling the noise without adding information.
+    const issues = badTable([2, 4]);
+    expect(issues.filter((issue) => issue.includes('contiguous ascending'))).toHaveLength(1);
+  });
+
+  it('still accepts well-formed tables', () => {
+    expect(badTable([1])).toEqual([]);
+    expect(badTable([1, 2])).toEqual([]);
+    expect(badTable([1, 2, 3, 4, 5, 6])).toEqual([]);
   });
 
   it('allows a higher level to require a higher Keep than the building unlock', () => {

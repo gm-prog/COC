@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { GRID } from '../src/config/geometry.js';
-import { OccupancyGrid, rectContains, rectsOverlap, type Rect } from '../src/grid/index.js';
+import {
+  isValidRect,
+  OccupancyGrid,
+  rectContains,
+  rectsOverlap,
+  type Rect,
+} from '../src/grid/index.js';
 
 const rect = (x: number, y: number, w: number, h: number): Rect => ({ x, y, w, h });
 
@@ -143,5 +149,110 @@ describe('isFree', () => {
   it('reports an empty rectangle as free', () => {
     const grid = new OccupancyGrid(GRID);
     expect(grid.isFree(rect(0, 0, 1, 1))).toBe(true);
+  });
+});
+
+describe('isValidRect', () => {
+  it('accepts finite integer origins with positive integer sizes', () => {
+    expect(isValidRect(rect(0, 0, 1, 1))).toBe(true);
+    expect(isValidRect(rect(4, 4, 3, 3))).toBe(true);
+    expect(isValidRect(rect(-1, -1, 1, 1))).toBe(true);
+  });
+
+  // --- A2 regression: malformed rectangles must never look "free" ----------
+  // A loop over { x: NaN, w: 3 } executes zero times, so without this guard
+  // findConflict() used to report "no conflict" for something that is not a
+  // rectangle at all.
+  const malformed: Record<string, Rect> = {
+    'NaN x': rect(Number.NaN, 0, 3, 3),
+    'NaN y': rect(0, Number.NaN, 3, 3),
+    'NaN w': rect(0, 0, Number.NaN, 3),
+    'NaN h': rect(0, 0, 3, Number.NaN),
+    'Infinity x': rect(Number.POSITIVE_INFINITY, 0, 3, 3),
+    '-Infinity y': rect(0, Number.NEGATIVE_INFINITY, 3, 3),
+    'Infinity w': rect(0, 0, Number.POSITIVE_INFINITY, 3),
+    'Infinity h': rect(0, 0, 3, Number.NEGATIVE_INFINITY),
+    'zero w': rect(0, 0, 0, 3),
+    'zero h': rect(0, 0, 3, 0),
+    'negative w': rect(0, 0, -3, 3),
+    'negative h': rect(0, 0, 3, -3),
+    'fractional x': rect(1.5, 0, 3, 3),
+    'fractional w': rect(0, 0, 2.5, 3),
+    'undefined x': rect(undefined as unknown as number, 0, 3, 3),
+    'undefined w': rect(0, 0, undefined as unknown as number, 3),
+    'string x': rect('4' as unknown as number, 0, 3, 3),
+    'null w': rect(0, 0, null as unknown as number, 3),
+  };
+
+  for (const [label, value] of Object.entries(malformed)) {
+    it(`rejects ${label}`, () => {
+      expect(isValidRect(value)).toBe(false);
+    });
+  }
+
+  it('rejects every malformed rectangle through the whole grid API', () => {
+    const grid = new OccupancyGrid(GRID);
+    for (const [label, value] of Object.entries(malformed)) {
+      expect(grid.isFree(value), `isFree should reject ${label}`).toBe(false);
+      expect(grid.canPlace(value), `canPlace should reject ${label}`).toBe(false);
+      expect(grid.findConflict(value), `findConflict should reject ${label}`).toMatchObject({
+        reason: 'invalid_rect',
+      });
+      expect(() => grid.fill(value, 1), `fill should reject ${label}`).toThrow(RangeError);
+      expect(() => grid.clear(value), `clear should reject ${label}`).toThrow(RangeError);
+    }
+  });
+
+  it('reports the malformed coordinates it was given', () => {
+    const grid = new OccupancyGrid(GRID);
+    expect(grid.findConflict(rect(Number.NaN, 7, 3, 3))).toEqual({
+      x: Number.NaN,
+      y: 7,
+      owner: 0,
+      reason: 'invalid_rect',
+    });
+  });
+
+  it('never mutates the grid when a rectangle is malformed', () => {
+    const grid = new OccupancyGrid(GRID);
+    grid.fill(rect(4, 4, 2, 2), 9);
+    try {
+      grid.fill(rect(Number.NaN, 0, 2, 2), 5);
+    } catch {
+      // expected
+    }
+    expect(grid.countOccupied()).toBe(4);
+    expect(grid.ownerAt(4, 4)).toBe(9);
+  });
+
+  it('skips forEachCell entirely for a malformed rectangle', () => {
+    const grid = new OccupancyGrid(GRID);
+    const seen: number[] = [];
+    grid.forEachCell(rect(Number.NaN, 0, 3, 3), (x) => seen.push(x));
+    expect(seen).toEqual([]);
+  });
+
+  it('rejects a malformed entry when rebuilding from state', () => {
+    expect(() =>
+      OccupancyGrid.fromEntries(GRID, [{ id: 1, x: 4, y: 4, w: Number.NaN, h: 3 }]),
+    ).toThrow(/malformed rectangle/);
+    expect(() => OccupancyGrid.fromEntries(GRID, [{ id: 1, x: 4, y: 4, w: 3, h: 0 }])).toThrow(
+      /malformed rectangle/,
+    );
+  });
+
+  it('rejects an invalid geometry instead of building a nonsense grid', () => {
+    expect(() => new OccupancyGrid({ total: 48, buildable: 41, margin: 4 })).toThrow(RangeError);
+    expect(() => new OccupancyGrid({ total: 0, buildable: 0, margin: 0 })).toThrow(RangeError);
+    expect(() => new OccupancyGrid({ total: 48, buildable: 40, margin: 3 })).toThrow(RangeError);
+  });
+
+  it('keeps the deterministic conflict ordering for valid rectangles', () => {
+    const grid = OccupancyGrid.fromEntries(GRID, [{ id: 1, x: 10, y: 10, w: 3, h: 3 }]);
+    // bounds, then margin, then occupancy — unchanged by the invalid_rect guard.
+    expect(grid.findConflict(rect(47, 47, 2, 2))).toMatchObject({ reason: 'out_of_bounds' });
+    expect(grid.findConflict(rect(43, 43, 3, 3))).toMatchObject({ reason: 'margin' });
+    expect(grid.findConflict(rect(11, 11, 1, 1))).toMatchObject({ reason: 'occupied' });
+    expect(grid.findConflict(rect(20, 20, 1, 1))).toBeNull();
   });
 });

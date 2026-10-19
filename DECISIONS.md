@@ -160,3 +160,91 @@ sits beside the state it clones for the same reason. `packages/game-data/tsconfi
 deleted — `build` and `typecheck` are both `tsc --noEmit` there, because `exports` points at source
 (D2) and nothing consumes `dist/` yet. The planned `gen:balance` script was dropped: there are no
 curve parameters to generate from yet.
+
+## D18 · 2026-10-19 · A level table is valid only as exactly `[1, 2, 3, …]`
+
+Gate A1. The old validator checked "contiguous" and "in order" separately, and neither
+implied the first level is 1 — a table of `[2]` or `[2, 3]` passed every check. Replaced
+by the single predicate `level === index + 1`, which subsumes ordering, gaps,
+duplicates and the start-at-1 rule. One message names the building and the supplied
+sequence, so a broken table produces one complaint instead of two.
+
+- **Impact:** a generated table that accidentally starts at level 2 now fails at load
+  time instead of silently making level 1 unreachable and shifting every cost index.
+
+## D19 · 2026-10-19 · `invalid_rect` is a first-class grid conflict reason
+
+Gate A2. `Number.isInteger` rejects `NaN`, `±Infinity`, `undefined`, strings and
+fractions, so `isValidRect` is a single predicate for "this is a rectangle". It is
+checked **before** bounds in `findConflict`, because a malformed rectangle cannot be
+bounds-checked meaningfully and a loop over it executes zero times — which is exactly
+how the bug hid. `fill`/`clear` throw and `forEachCell` no-ops, so the mutating API
+cannot silently accept one either.
+
+- **Why a conflict reason rather than an exception:** it keeps the grid pure and lets the
+  command layer map it to a stable `invalid_rect` error code, matching the existing
+  bounds/margin/occupancy pattern.
+- **Impact:** `CellConflict.reason` and `CommandErrorCode` each gained one member. The
+  ordering for valid rectangles (bounds → margin → occupancy) is unchanged.
+
+## D20 · 2026-10-19 · Command payloads are validated at runtime, not by their types
+
+Gate A2. `GameCommand` is a TypeScript type, and types do not validate data that arrives
+over the wire. Every coordinate is now checked with `requireTileCoordinate` before any
+grid arithmetic, and `command.id` / `ctx.now` were already checked.
+
+- **Why:** a tampered client sending `{ x: NaN }` would previously sail through the type
+  and be treated as "no conflict", placing a building at a nonsensical position.
+- **Impact:** rejections are `invalid_command`, matching the existing envelope checks.
+
+## D21 · 2026-10-19 · No silent footprint fallback for unknown entities
+
+Gate A5. `buildGrid` used `def?.size.w ?? 1`, which let an entity whose definition was
+missing from the config be rebuilt into the grid as 1×1 — a phantom size that made the
+grid disagree with the config and could let an unknown entity be treated as a legal
+placement. A missing definition is now a typed `unknown_building`/`unknown_obstacle`
+error and a malformed instance is `invalid_state`.
+
+- **Why:** "fail loudly on bad data" is the config loader's whole contract; silently
+  substituting a size contradicts it. Balance and geometry come from validated config or
+  not at all.
+- **Impact:** `buildGrid` returns `OccupancyGrid | CommandError` instead of throwing, so a
+  state/config mismatch surfaces as a typed command result rather than an exception.
+
+## D22 · 2026-10-19 · The RNG round-trip test must snapshot the high-bit state itself
+
+Gate A3. The previous test observed that a high-bit state occurred _somewhere_ in a loop
+and then serialized the final state, so it never proved the high-bit state round-trips —
+which was the exact regression it was written for. It now captures the snapshot at the
+moment `state > 0x7fffffff`, asserts exact state equality, and compares five subsequent
+draws; a second test round-trips every high-bit state in a 20,000-draw run and asserts
+more than 1,000 such states were exercised.
+
+## D23 · 2026-10-19 · Benchmarks must measure the function they name
+
+Gate A4. The "10,000 clones" measurement called `createNewPlayerState`, which builds a
+state from config — cheaper and structurally different from deep-copying an existing one.
+It now calls the exported `clonePlayerState` on a representative nested state, consumes
+the result via a checksum, and asserts the clone is neither the input object nor a
+different hash.
+
+- **Why:** a benchmark that measures the wrong function is worse than no benchmark — it
+  makes the real cost invisible.
+- **Impact:** the reported figure moved from ~13 ms to ~40 ms, i.e. the clone is roughly
+  3× more expensive than the number that was being published.
+
+## D24 · 2026-10-19 · `docs/VERIFICATION_PROMPT.md` is corrected against source, not the reverse
+
+Gate A6. Several Phase 1 claims in the verification prompt did not match the code: the
+grid API was listed as having `set()`/`toIds()` (it has `fill`/`clear`/`forEachCell`),
+`RemoveObstacle` was described as a stub reward (it reads `def.reward`, credits resources
+and emits both `ObstacleRemoved` and `ResourcesChanged`), `hashString` was described as
+"FNV-1a → base36" (it is FNV-1a concatenated with sdbm, 16 lowercase hex chars), and
+anchored Vite aliases were claimed as tested when no test checked them.
+
+The working code was left alone and the prose corrected, except for the alias claim, where
+the missing assertion was **added** to `test/config.test.ts` rather than the claim being
+narrowed — the property is real and worth enforcing.
+
+- **Impact:** the verification prompt now distinguishes source-verified facts from claims,
+  and a reviewer re-running it against the current branch gets the same numbers.

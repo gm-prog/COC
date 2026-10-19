@@ -127,12 +127,17 @@ tests that drive the generator past the sign boundary and prove the round-trip.
 
 ### `packages/sim-core/src/grid/index.ts`
 
-`OccupancyGrid` over an `Int32Array`; `set`/`clear`/`isFree`/`canPlace`/`findConflict`/`toIds`.
-`findConflict` reports **bounds → margin → occupancy**, in that fixed order, so error messages are
-deterministic.
-**Verify:** `test/grid.test.ts` — 16 tests including out-of-bounds, margin, overlap, exact-fit
-edges, a margin cell that is _not_ the first cell of the footprint, and `isFree` rejecting a
-rectangle that leaves the map.
+`OccupancyGrid` over an `Int32Array`. Public API: `fromEntries`, `ownerAt`, `countOccupied`,
+`isInsideMap`, `isInsideBuildable`, `isFree`, `canPlace`, `findConflict`, `fill`, `clear`,
+`forEachCell`, plus the `isValidRect` predicate and the `rectsOverlap`/`rectContains` helpers.
+There is **no** `set()` and **no** `toIds()`.
+`findConflict` reports **invalid_rect → bounds → margin → occupancy**, in that fixed order, so error
+messages are deterministic. `invalid_rect` is checked first because a malformed rectangle cannot be
+bounds-checked meaningfully, and a loop over `{ x: NaN, w: 3 }` executes zero times and would
+otherwise report "no conflict".
+**Verify:** `test/grid.test.ts` — out-of-bounds, margin, overlap, exact-fit edges, a margin cell
+that is _not_ the first cell of the footprint, `isFree` rejecting a rectangle that leaves the map,
+and 18 malformed rectangles asserted across the whole API.
 
 ### `packages/sim-core/src/config/geometry.ts` + `types.ts`
 
@@ -179,8 +184,10 @@ place/move/remove, reward events, purity (input untouched), and the config-drift
 
 ### `packages/sim-core/src/serialize/index.ts`
 
-`stableStringify` (recursively sorted keys; `-0` → `0`; non-finite → `null`; bigint/function/symbol
-and circular references rejected), `stableParse`, `hashString` (FNV-1a → base36), `hashState`.
+`stableStringify` (recursively sorted keys; `-0` → `0`; non-finite → `null`; bigint/function/symbol,
+circular references and `Map`/`Set` rejected), `stableParse`, `hashValue`, `hashState`.
+`hashString` is **FNV-1a (32-bit) concatenated with sdbm (32-bit)**, each rendered as 8 lowercase
+hex digits, producing a 16-character hex string. It is _not_ base36 and not a single hash.
 **Verify:** `test/serialize.test.ts` — 18 tests including key ordering, `-0`/non-finite
 normalisation, and each rejection.
 
@@ -232,11 +239,14 @@ grid geometry in `config/geometry.ts` (which is itself a config constant, not a 
 `tsconfig.base.json` `paths` and the `workspaceAliases` record in `apps/client/vite.config.ts` must
 agree, and the Vite aliases must be **anchored RegExps**, not strings (string aliases are prefix
 matches, which previously made `@coc/game-data` swallow `@coc/game-data/version` and break the
-client build). `test/config.test.ts` enforces this.
+client build). `test/config.test.ts` enforces this: it re-derives the anchored pattern for every alias key,
+asserts each matches its own key and rejects `key/version` and `keyx`, and proves the unanchored
+form really does swallow the subpath.
 
 ```bash
-grep -n "new RegExp" apps/client/vite.config.ts      # expected: present
-grep -n "game-data/version" tsconfig.base.json apps/client/vite.config.ts
+grep -n "new RegExp" apps/client/vite.config.ts          # expected: present
+grep -n "alias: aliasEntries" apps/client/vite.config.ts # expected: present
+grep -n "alias: workspaceAliases" apps/client/vite.config.ts  # expected: absent
 ```
 
 ### 6.4 Coverage thresholds are real
@@ -276,63 +286,69 @@ Mark each `PASS` / `FAIL` / `UNVERIFIABLE` with evidence.
 
 ### Phase 1 — sim-core foundations
 
-| #    | Claim                                                                                                     | How to verify                                                       |
-| ---- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| 1.1  | Fixed-point math with exact integer `isqrt`/`hypotFixed`                                                  | `src/math/index.ts`, 20 tests                                       |
-| 1.2  | Seeded PRNG with a pure state-passing API                                                                 | `src/rng/index.ts`, 17 tests                                        |
-| 1.3  | RNG determinism across 1,000,000 draws                                                                    | `test/rng.test.ts` ("produces the same sequence for the same seed") |
-| 1.4  | RNG serialization is an exact inverse, past the sign boundary                                             | `test/rng.test.ts` round-trip block                                 |
-| 1.5  | Occupancy grid with bounds/margin/overlap/free checks                                                     | `src/grid/index.ts`, 16 tests                                       |
-| 1.6  | State types match spec §8.2; `createNewPlayerState` is config-driven                                      | `src/state/index.ts`, 15 tests                                      |
-| 1.7  | Config loader fails loudly with **all** issues listed                                                     | `src/validate/index.ts`, 31 tests                                   |
-| 1.8  | `requiresKeep` is a per-level table with the two rules in D11, **not** `requiresKeep <= unlock.keepLevel` | `src/validate/index.ts`; confirm the wrong rule is absent           |
-| 1.9  | Initial configs exist for Keep, Gold Mine, Essence Well, Gold/Essence Store, Wall, obstacles              | `packages/game-data/data/*.json`                                    |
-| 1.10 | `applyCommand` returns typed `ok + events` or `error + code`, never mutates input                         | `src/commands/index.ts`, 30 tests                                   |
-| 1.11 | `PlaceBuilding`, `MoveBuilding` (move-onto-self allowed), `RemoveObstacle` (stub reward)                  | `src/commands/index.ts`                                             |
-| 1.12 | Stable sorted-key JSON + `hashState()`                                                                    | `src/serialize/index.ts`, 18 tests                                  |
-| 1.13 | Identical `hashState()` for a repeated command list                                                       | `test/serialize.test.ts` + `pnpm bench`                             |
-| 1.14 | ≥90% line coverage on state/grid/commands                                                                 | `pnpm test:coverage` (claimed 99.26%)                               |
-| 1.15 | Placement tests cover bounds/overlap/margin/exact-fit/move-onto-self/walls-adjacent                       | `test/commands.test.ts`, `test/grid.test.ts`                        |
-| 1.16 | Invalid-config rejection is tested                                                                        | `test/validate.test.ts`, `test/game-data.test.ts`                   |
-| 1.17 | No `Date.now`/`Math.random` in sim-core                                                                   | §6.1                                                                |
-| 1.18 | No hard-coded balance numbers in logic                                                                    | §6.2                                                                |
-| 1.19 | Config version is importable without Zod                                                                  | `src/version.ts`, `./version` export, §6.5                          |
-| 1.20 | `PROGRESS.md` and `DECISIONS.md` are up to date and internally consistent with the code                   | read both                                                           |
+| #     | Claim                                                                                                     | How to verify                                                       |
+| ----- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| 1.1   | Fixed-point math with exact integer `isqrt`/`hypotFixed`                                                  | `src/math/index.ts`, 20 tests                                       |
+| 1.2   | Seeded PRNG with a pure state-passing API                                                                 | `src/rng/index.ts`, 18 tests                                        |
+| 1.3   | RNG determinism across 1,000,000 draws                                                                    | `test/rng.test.ts` ("produces the same sequence for the same seed") |
+| 1.4   | RNG serialization is an exact inverse, past the sign boundary                                             | `test/rng.test.ts` round-trip block                                 |
+| 1.4b  | The high-bit state itself is snapshotted and round-tripped (Gate A3)                                      | captured at `state > 0x7fffffff`, 5 subsequent draws compared       |
+| 1.5   | Occupancy grid with bounds/margin/overlap/free checks                                                     | `src/grid/index.ts`, 42 tests                                       |
+| 1.5b  | Malformed rects rejected at the grid boundary (Gate A2)                                                   | 18 malformed cases across the whole grid API                        |
+| 1.6   | State types match spec §8.2; `createNewPlayerState` is config-driven                                      | `src/state/index.ts`, 15 tests                                      |
+| 1.7   | Config loader fails loudly with **all** issues listed                                                     | `src/validate/index.ts`, 38 tests                                   |
+| 1.8   | `requiresKeep` is a per-level table with the two rules in D11, **not** `requiresKeep <= unlock.keepLevel` | `src/validate/index.ts`; confirm the wrong rule is absent           |
+| 1.9   | Initial configs exist for Keep, Gold Mine, Essence Well, Gold/Essence Store, Wall, obstacles              | `packages/game-data/data/*.json`                                    |
+| 1.10  | `applyCommand` returns typed `ok + events` or `error + code`, never mutates input                         | `src/commands/index.ts`, 74 tests                                   |
+| 1.10b | Malformed runtime payloads rejected before grid work (Gate A2)                                            | 10 bad-coordinate cases × 3 commands                                |
+| 1.10c | No silent 1×1 footprint fallback for unknown entities (Gate A5)                                           | typed `unknown_building`/`unknown_obstacle`/`invalid_state`         |
+| 1.11  | `PlaceBuilding`, `MoveBuilding` (move-onto-self allowed), `RemoveObstacle` (reads configured reward)      | `src/commands/index.ts`                                             |
+| 1.12  | Stable sorted-key JSON + `hashState()`                                                                    | `src/serialize/index.ts`, 18 tests                                  |
+| 1.13  | Identical `hashState()` for a repeated command list                                                       | `test/serialize.test.ts` + `pnpm bench`                             |
+| 1.14  | ≥90% line coverage on state/grid/commands                                                                 | `pnpm test:coverage` (claimed 99.33%)                               |
+| 1.15  | Placement tests cover bounds/overlap/margin/exact-fit/move-onto-self/walls-adjacent                       | `test/commands.test.ts`, `test/grid.test.ts`                        |
+| 1.16  | Invalid-config rejection is tested                                                                        | `test/validate.test.ts`, `test/game-data.test.ts`                   |
+| 1.17  | No `Date.now`/`Math.random` in sim-core                                                                   | §6.1                                                                |
+| 1.18  | No hard-coded balance numbers in logic                                                                    | §6.2                                                                |
+| 1.19  | Config version is importable without Zod                                                                  | `src/version.ts`, `./version` export, §6.5                          |
+| 1.20  | `PROGRESS.md` and `DECISIONS.md` are up to date and internally consistent with the code                   | read both                                                           |
 
 ### Cross-cutting
 
-| #   | Claim                                                                 | How to verify                                        |
-| --- | --------------------------------------------------------------------- | ---------------------------------------------------- |
-| X.1 | The tsconfig-paths ↔ Vite-alias drift guard actually compares the two | `test/config.test.ts` (5 tests)                      |
-| X.2 | `packages/protocol` has a test (this was missing after Phase 0)       | `packages/protocol/test/protocol.test.ts` (4 tests)  |
-| X.3 | Reported test counts match reality                                    | §7 "Expected numbers"                                |
-| X.4 | Reported coverage numbers match reality                               | `vitest.config.ts` thresholds + `pnpm test:coverage` |
-| X.5 | No reference-game names/art/sounds used as branding                   | grep for trademarked terms across the repo           |
+| #    | Claim                                                                                 | How to verify                                        |
+| ---- | ------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| X.1  | The tsconfig-paths ↔ Vite-alias drift guard actually compares the two                 | `test/config.test.ts` (6 tests)                      |
+| X.2  | `packages/protocol` has a test (this was missing after Phase 0)                       | `packages/protocol/test/protocol.test.ts` (4 tests)  |
+| X.3  | Reported test counts match reality                                                    | §8 "Expected numbers"                                |
+| X.3b | The clone benchmark measures `clonePlayerState`, not `createNewPlayerState` (Gate A4) | `packages/sim-core/bench/benchmark.ts`               |
+| X.4  | Reported coverage numbers match reality                                               | `vitest.config.ts` thresholds + `pnpm test:coverage` |
+| X.5  | No reference-game names/art/sounds used as branding                                   | grep for trademarked terms across the repo           |
 
 ---
 
 ## 8 · Expected numbers (compare against what you actually find)
 
-| Metric                                       | Expected                                                                                                                                                                                   |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Commits on branch                            | 7 total (`064de73` + 6 above); `main` has 1                                                                                                                                                |
-| Test files                                   | 15                                                                                                                                                                                         |
-| Tests                                        | **203**                                                                                                                                                                                    |
-| Tests per file                               | rng 17 · math 20 · server 3 · cameraTransform 10 · commands 30 · validate 31 · grid 16 · iso 6 · game-data 14 · state 15 · serialize 18 · geometry 10 · config 5 · protocol 4 · sim-core 4 |
-| sim-core coverage — statements               | 99.26% (threshold 90)                                                                                                                                                                      |
-| sim-core coverage — branches                 | 93.35% (threshold 85)                                                                                                                                                                      |
-| sim-core coverage — functions                | 100% (threshold 90)                                                                                                                                                                        |
-| sim-core coverage — lines                    | 99.26% (threshold 90)                                                                                                                                                                      |
-| Client production bundle                     | 1,217.90 kB / 335.73 kB gzip (must equal the Phase 0 figure)                                                                                                                               |
-| Benchmark — 1,000,000 RNG draws              | ~31 ms, checksum `3856587346`                                                                                                                                                              |
-| Benchmark — 1000 commands (250 openings × 4) | ~45 ms                                                                                                                                                                                     |
-| Benchmark — 10,000 state clones              | ~13 ms                                                                                                                                                                                     |
-| Benchmark — stable hash                      | `fb5a3f0d6ef30c08`                                                                                                                                                                         |
-| `GRID`                                       | total 48 / buildable 40 / margin 4                                                                                                                                                         |
-| `FIXED_ONE`                                  | 1000                                                                                                                                                                                       |
-| `SIM_CORE_VERSION`                           | `0.1.0`                                                                                                                                                                                    |
-| `STATE_VERSION`                              | 1                                                                                                                                                                                          |
-| `PROTOCOL_VERSION`                           | `0.1.0`                                                                                                                                                                                    |
+| Metric                                          | Expected after Gate A hardening                                                                                                                                                            |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Commits on branch                               | 8 total (`064de73` + 6 Phase 0/1 + 1 hardening); `main` has 1                                                                                                                              |
+| Test files                                      | 15                                                                                                                                                                                         |
+| Tests                                           | **281**                                                                                                                                                                                    |
+| Tests per file                                  | rng 18 · math 20 · server 3 · cameraTransform 10 · commands 74 · validate 38 · grid 42 · iso 6 · game-data 14 · state 15 · serialize 18 · geometry 10 · config 6 · protocol 4 · sim-core 4 |
+| sim-core coverage — statements                  | 99.33% (threshold 90)                                                                                                                                                                      |
+| sim-core coverage — branches                    | 95.88% (threshold 85)                                                                                                                                                                      |
+| sim-core coverage — functions                   | 100% (threshold 90)                                                                                                                                                                        |
+| sim-core coverage — lines                       | 99.33% (threshold 90)                                                                                                                                                                      |
+| Client production bundle                        | 1,217.90 kB / 335.73 kB gzip (must equal the Phase 0 figure)                                                                                                                               |
+| Benchmark — 1,000,000 RNG draws                 | ~36 ms, checksum `3856587346`                                                                                                                                                              |
+| Benchmark — 1000 commands (250 openings × 4)    | ~56 ms                                                                                                                                                                                     |
+| Benchmark — 10,000 **`clonePlayerState`** calls | ~40 ms (must measure the clone, not `createNewPlayerState`)                                                                                                                                |
+| Benchmark — stable hash                         | `fb5a3f0d6ef30c08`                                                                                                                                                                         |
+| `GRID`                                          | total 48 / buildable 40 / margin 4                                                                                                                                                         |
+| `FIXED_ONE`                                     | 1000                                                                                                                                                                                       |
+| `SIM_CORE_VERSION`                              | `0.1.0`                                                                                                                                                                                    |
+| `STATE_VERSION`                                 | 1                                                                                                                                                                                          |
+| `PROTOCOL_VERSION`                              | `0.1.0`                                                                                                                                                                                    |
+| `hashString`                                    | 16 lowercase hex chars (FNV-1a ‖ sdbm, 32-bit each)                                                                                                                                        |
 
 ---
 
@@ -357,6 +373,17 @@ demanded them earlier than claimed.
    is gitignored and nothing consumes it, so this is an inconsistency to clean up in Phase 17
    (when `exports` moves to built output) rather than a defect now.
 8. Coverage is measured on `packages/sim-core/src` only; `apps/*` are not yet thresholded.
+9. `checkPlacement`'s `invalid_rect` mapping is defense-in-depth: command payloads are validated
+   first, so it is only reachable when a caller hands `applyCommand` a `GameConfig` that was never
+   produced by `validateGameConfig` (the type is structural). It is tested that way deliberately
+   rather than deleted, because that is exactly the untrusted-input path the spec worries about.
+10. The `!moved` re-check after `clonePlayerState` in `MoveBuilding` is unreachable in practice and
+    is the single remaining uncovered branch; it is kept as a clone-fidelity guard rather than
+    papered over with a test that cannot fail.
+11. The checkout this was built in arrived with the local branch pointer at `064de73` while the
+    working tree still held every Phase 0/1 file and `origin` was at `4b7d98e`.
+    `git reset --mixed 4b7d98e` restored the pointer and the working tree matched exactly, so no
+    work was lost. See the recon note at the end of `PROGRESS.md`.
 
 ---
 
@@ -369,7 +396,23 @@ Verify both are genuinely fixed in the current code, not just described:
    diverged. Fixed by storing it unsigned throughout; the arithmetic is bit-identical so no drawn
    value moved. **Verify:** `packages/sim-core/src/rng/index.ts` has no `| 0` on the state, and
    `test/rng.test.ts` has a regression test that drives past the sign boundary.
-2. **Vite alias prefix match.** String `resolve.alias` entries are prefix matches, so
+2. **Level tables could start at 2.** `checkSemantics` verified contiguity and ordering but never
+   that the first level is 1, so a table like `[2]` or `[2, 3]` passed every check. Level 1 became
+   unreachable and every later level's cost index was wrong. Replaced by one predicate
+   (`level === index + 1`) with a single actionable message. **Verify:**
+   `packages/sim-core/src/validate/index.ts` and the A1 block in `test/validate.test.ts`.
+3. **Malformed rectangles looked free.** A loop over `{ x: NaN, w: 3 }` executes zero times, so
+   `findConflict` reported "no conflict" for something that is not a rectangle. Fixed with
+   `isValidRect` checked first in `findConflict`/`isFree` and enforced in `fill`/`clear`/
+   `forEachCell`/`fromEntries`, surfaced as the new `invalid_rect` conflict reason and
+   `invalid_rect` error code. **Verify:** `packages/sim-core/src/grid/index.ts` and the A2 blocks in
+   `test/grid.test.ts` / `test/commands.test.ts`.
+4. **A silent 1×1 footprint fallback.** `buildGrid` used `def?.size.w ?? 1`, so an entity whose
+   definition was missing from the config was rebuilt into the grid as 1×1 and could be treated as a
+   legal placement. Removed; a missing definition is now a typed `unknown_building` /
+   `unknown_obstacle` error and a malformed instance is `invalid_state`. **Verify:** the A5 block in
+   `test/commands.test.ts`.
+5. **Vite alias prefix match.** String `resolve.alias` entries are prefix matches, so
    `'@coc/game-data'` also captured `'@coc/game-data/version'` and resolved it to
    `…/src/index.ts/version`, breaking the client build. Fixed with anchored RegExps.
    **Verify:** `apps/client/vite.config.ts` builds `find: new RegExp('^' + escaped + '$')`.
