@@ -1,4 +1,4 @@
-import { t } from './i18n';
+import { t, type TranslationKey } from './i18n';
 
 /**
  * Thin wrapper over the DOM debug HUD (index.html).
@@ -57,5 +57,40 @@ export class Hud {
 
   setVersions(versions: { protocol: string; simCore: string; config: string }): void {
     this.text('hud-versions', t('hud.versions', versions));
+  }
+
+  setSelection(
+    details: {
+      kind: 'building' | 'obstacle';
+      id: string;
+      x: number;
+      y: number;
+      level?: number;
+    } | null,
+  ): void {
+    const panel = this.el('selection-panel');
+    if (!panel) return;
+
+    if (!details) {
+      panel.hidden = true;
+      return;
+    }
+
+    panel.hidden = false;
+    this.text(
+      'selection-kind',
+      t(details.kind === 'building' ? 'selection.kind.building' : 'selection.kind.obstacle'),
+    );
+    this.text('selection-title', t(`${details.kind}.${details.id}` as TranslationKey));
+    this.text(
+      'selection-meta',
+      details.kind === 'building' && details.level !== undefined
+        ? t('selection.meta.building', {
+            level: details.level,
+            x: details.x,
+            y: details.y,
+          })
+        : t('selection.meta.obstacle', { x: details.x, y: details.y }),
+    );
   }
 }

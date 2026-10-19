@@ -1,7 +1,14 @@
 import Phaser from 'phaser';
+import { GAME_CONFIG } from '@coc/game-data';
 import { CONFIG_VERSION } from '@coc/game-data/version';
 import { PROTOCOL_VERSION } from '@coc/protocol';
-import { GRID, SIM_CORE_VERSION } from '@coc/sim-core';
+import {
+  createNewPlayerState,
+  GRID,
+  SIM_CORE_VERSION,
+  type BuildingCategory,
+  type PlayerState,
+} from '@coc/sim-core';
 import {
   centerOnWorld,
   clampPan,
@@ -13,6 +20,11 @@ import {
   type ViewBounds,
 } from '../cameraTransform';
 import { Hud } from '../hud';
+import {
+  findVillageEntityAtTile,
+  listVillageEntities,
+  type VillageEntity,
+} from '../villageLayout';
 import {
   screenToTileFloor,
   tileCenterToScreen,
@@ -40,6 +52,36 @@ const COLORS = {
   marginLine: 0x8a5a2b,
 };
 
+interface EntityStyle {
+  top: number;
+  left: number;
+  right: number;
+  height: number;
+}
+
+const BUILDING_STYLES: Record<BuildingCategory, EntityStyle> = {
+  hq: { top: 0xf6c76d, left: 0x99602e, right: 0xc58b3f, height: 24 },
+  economy: { top: 0x78ca8a, left: 0x326b48, right: 0x4b9a64, height: 14 },
+  storage: { top: 0x79bce5, left: 0x315c80, right: 0x427eaa, height: 15 },
+  army: { top: 0xc3a0e8, left: 0x69478a, right: 0x8964ad, height: 16 },
+  defense: { top: 0xe58b82, left: 0x8a3e3a, right: 0xb6554d, height: 17 },
+  trap: { top: 0xd0a16b, left: 0x78502d, right: 0xa46d3c, height: 5 },
+  wall: { top: 0xb5bdc9, left: 0x626d7c, right: 0x8792a1, height: 7 },
+  misc: { top: 0xc1c7d0, left: 0x626975, right: 0x858c98, height: 10 },
+};
+
+const OBSTACLE_STYLES: Record<string, EntityStyle> = {
+  tree: { top: 0x78b66c, left: 0x345a38, right: 0x4e8248, height: 12 },
+  rock: { top: 0xb4bdc9, left: 0x596371, right: 0x7d8796, height: 5 },
+};
+
+const FALLBACK_OBSTACLE_STYLE: EntityStyle = {
+  top: 0xb4bdc9,
+  left: 0x596371,
+  right: 0x7d8796,
+  height: 6,
+};
+
 interface Tile {
   x: number;
   y: number;
@@ -57,9 +99,12 @@ export class BootScene extends Phaser.Scene {
   private hud!: Hud;
   private world!: Phaser.GameObjects.Container;
   private staticLayer!: Phaser.GameObjects.Graphics;
+  private entityLayer!: Phaser.GameObjects.Graphics;
   private hoverLayer!: Phaser.GameObjects.Graphics;
   private selectLayer!: Phaser.GameObjects.Graphics;
 
+  private playerState!: PlayerState;
+  private selectedEntity: VillageEntity | null = null;
   private transform: CameraTransform = { zoom: 1, panX: 0, panY: 0 };
 
   private panPointerId = -1;
@@ -92,11 +137,14 @@ export class BootScene extends Phaser.Scene {
 
     this.world = this.add.container(0, 0);
     this.staticLayer = this.add.graphics();
-    this.hoverLayer = this.add.graphics();
+    this.entityLayer = this.add.graphics();
     this.selectLayer = this.add.graphics();
-    this.world.add([this.staticLayer, this.selectLayer, this.hoverLayer]);
+    this.hoverLayer = this.add.graphics();
+    this.world.add([this.staticLayer, this.entityLayer, this.selectLayer, this.hoverLayer]);
 
+    this.playerState = createNewPlayerState(GAME_CONFIG, 0);
     this.drawStaticGrid();
+    this.drawVillageEntities();
 
     this.recenter();
 
@@ -146,6 +194,49 @@ export class BootScene extends Phaser.Scene {
     g.fillCircle(origin.x, origin.y, 12);
   }
 
+  /** Draws simple, data-driven placeholder blocks from the starter state. */
+  private drawVillageEntities(): void {
+    this.entityLayer.clear();
+    for (const entity of listVillageEntities(this.playerState, GAME_CONFIG)) {
+      this.drawEntityBlock(entity);
+    }
+  }
+
+  private drawEntityBlock(entity: VillageEntity): void {
+    const instance = entity.instance;
+    const size = entity.definition.size;
+    const style =
+      entity.kind === 'building'
+        ? BUILDING_STYLES[entity.definition.category]
+        : (OBSTACLE_STYLES[entity.definition.id] ?? FALLBACK_OBSTACLE_STYLE);
+
+    const base = tileRectToScreenQuad(instance.x, instance.y, size.w, size.h);
+    const top = base.map((point) => ({ x: point.x, y: point.y - style.height }));
+    const b1 = base[1]!;
+    const b2 = base[2]!;
+    const b3 = base[3]!;
+    const t0 = top[0]!;
+    const t1 = top[1]!;
+    const t2 = top[2]!;
+    const t3 = top[3]!;
+    const g = this.entityLayer;
+
+    // A subtle ground footprint anchors each raised block to its tiles.
+    g.fillStyle(0x080c12, 0.28);
+    g.fillPoints(base, true);
+
+    g.fillStyle(style.left, 1);
+    g.fillPoints([b3, b2, t2, t3], true);
+    g.fillStyle(style.right, 1);
+    g.fillPoints([b1, b2, t2, t1], true);
+    g.fillStyle(style.top, 1);
+    g.fillPoints(top, true);
+    g.lineStyle(1, 0x0d1117, 0.85);
+    g.strokePoints(top, true);
+    g.lineStyle(1, 0xffffff, 0.18);
+    g.lineBetween(t0.x, t0.y, t1.x, t1.y);
+  }
+
   private drawTileOverlay(
     g: Phaser.GameObjects.Graphics,
     tile: Tile,
@@ -179,6 +270,14 @@ export class BootScene extends Phaser.Scene {
 
   private redrawSelection(): void {
     this.selectLayer.clear();
+    if (this.selectedEntity) {
+      const instance = this.selectedEntity.instance;
+      const size = this.selectedEntity.definition.size;
+      const footprint = tileRectToScreenQuad(instance.x, instance.y, size.w, size.h);
+      this.selectLayer.lineStyle(3, COLORS.selectLine, 1);
+      this.selectLayer.strokePoints(footprint, true);
+      return;
+    }
     if (this.selectedTile) {
       this.drawTileOverlay(this.selectLayer, this.selectedTile, 0x000000, 0, COLORS.selectLine, 3);
     }
@@ -394,13 +493,43 @@ export class BootScene extends Phaser.Scene {
     const tile = screenToTileFloor(world.x, world.y);
     if (!this.isInsideMap(tile)) {
       this.selectedTile = null;
+      this.selectedEntity = null;
       this.redrawSelection();
+      this.hud.clearTile();
+      this.hud.clearZone();
+      this.hud.setSelection(null);
       return;
     }
-    this.selectedTile = tile;
+
+    this.selectedEntity = findVillageEntityAtTile(
+      this.playerState,
+      GAME_CONFIG,
+      tile.x,
+      tile.y,
+    );
+    this.selectedTile = this.selectedEntity ? null : tile;
     this.redrawSelection();
     this.hud.setTile(tile.x, tile.y);
     this.hud.setZone(this.isBuildable(tile));
+    const entity = this.selectedEntity;
+    if (entity?.kind === 'building') {
+      this.hud.setSelection({
+        kind: 'building',
+        id: entity.definition.id,
+        x: entity.instance.x,
+        y: entity.instance.y,
+        level: entity.instance.level,
+      });
+    } else if (entity?.kind === 'obstacle') {
+      this.hud.setSelection({
+        kind: 'obstacle',
+        id: entity.definition.id,
+        x: entity.instance.x,
+        y: entity.instance.y,
+      });
+    } else {
+      this.hud.setSelection(null);
+    }
   }
 
   // ----------------------------------------------------------------- update
