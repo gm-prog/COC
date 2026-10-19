@@ -1,0 +1,25 @@
+[
+  {
+    "id": "tree",
+    "size": {
+      "w": 1,
+      "h": 1
+    },
+    "reward": {
+      "gold": 20
+    },
+    "removalSeconds": 3
+  },
+  {
+    "id": "rock",
+    "size": {
+      "w": 1,
+      "h": 1
+    },
+    "reward": {
+      "gold": 30,
+      "gems": 1
+    },
+    "removalSeconds": 5
+  }
+]

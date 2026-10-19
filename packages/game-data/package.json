@@ -1,0 +1,42 @@
+{
+  "name": "@coc/game-data",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Data-driven balance tables for Emberhold (buildings, obstacles, starter layout) plus the generator scripts that produce them.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./version": {
+      "types": "./src/version.ts",
+      "default": "./src/version.ts"
+    },
+    "./data/buildings.json": "./data/buildings.json",
+    "./data/obstacles.json": "./data/obstacles.json",
+    "./data/starter.json": "./data/starter.json",
+    "./data/economy.json": "./data/economy.json",
+    "./data/limits.json": "./data/limits.json"
+  },
+  "files": [
+    "src",
+    "data",
+    "dist"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc --noEmit -p tsconfig.json",
+    "watch": "tsc --noEmit -p tsconfig.json --watch",
+    "gen:balance": "tsx scripts/gen-balance.ts"
+  },
+  "dependencies": {
+    "@coc/sim-core": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  },
+  "sideEffects": false
+}

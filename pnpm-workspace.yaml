@@ -1,0 +1,12 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+
+# esbuild ships its platform binary through a postinstall script. tsx (the
+# server/tools dev runner) needs it, so it is explicitly allowed here rather than
+# interactively approved on every machine.
+allowBuilds:
+  esbuild: true
+
+onlyBuiltDependencies:
+  - esbuild

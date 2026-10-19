@@ -1,0 +1,22 @@
+{
+  "name": "@coc/client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Emberhold game client — Phaser 3 + Vite, runs in the browser and (later) inside Capacitor.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@coc/game-data": "workspace:*",
+    "@coc/protocol": "workspace:*",
+    "@coc/sim-core": "workspace:*",
+    "phaser": "^3.90.0"
+  },
+  "devDependencies": {
+    "vite": "^7.3.7"
+  }
+}
