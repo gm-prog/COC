@@ -34,7 +34,7 @@ Design source of truth: [`docs/GAME_SPEC.md`](docs/GAME_SPEC.md).
 | ----- | ------------------------------------ | -------------- |
 | 0     | Bootstrap & tooling                  | ✅ Complete    |
 | 1     | Sim-core foundations                 | ✅ Complete    |
-| 2     | Economy & construction               | ⚪ Not started |
+| 2     | Economy & construction               | ✅ Complete    |
 | 3     | Client: Village scene & building UX  | ⚪ Not started |
 | 4     | Army, spells, laboratory             | ⚪ Not started |
 | 5     | Battle simulator (headless)          | ⚪ Not started |
@@ -344,7 +344,7 @@ unreachable branch left uncovered is the `!moved` re-check after cloning in
 
 ---
 
-# Gate B — Phase 2 (Economy & Construction) · COMPLETE, NOT COMMITTED
+# Gate B — Phase 2 (Economy & Construction) · COMPLETE, MERGED (PR #1)
 
 Full report: **`PHASE2_REPORT.md`**. Decisions D25–D29 in `DECISIONS.md`.
 
