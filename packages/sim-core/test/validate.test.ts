@@ -6,6 +6,9 @@ import {
   validateBuildingDefs,
   validateGameConfig,
 } from '../src/validate/index.js';
+// The bounds are shared constants on the package's public surface, so tests read
+// them from the barrel rather than duplicating the numbers.
+import { MAX_SPEED_UP_GEMS, MAX_SPEED_UP_SECONDS } from '../src/index.js';
 import { NOW, TEST_CONFIG } from './fixtures/config.js';
 
 /** Loosely typed on purpose: most of these tests mutate it into invalid shapes. */
@@ -897,5 +900,99 @@ describe('builder ceiling (spec 7.5)', () => {
       maxBuilders: 5,
       costs: [{ gems: 250 }, { gems: 500 }, { gems: 1000 }],
     });
+  });
+});
+
+describe('speed-up anchor arithmetic bounds (spec 6.4)', () => {
+  const withSpeedUp = (anchors: { seconds: number; gems: number }[], minimumGems = 1): any => {
+    const raw = minimal();
+    raw.economy.speedUp = { anchors, minimumGems };
+    return raw;
+  };
+
+  it('accepts the shipped anchors unchanged', () => {
+    expect(validateGameConfig(minimal()).economy.speedUp.anchors).toEqual([
+      { seconds: 60, gems: 1 },
+      { seconds: 3600, gems: 20 },
+      { seconds: 86400, gems: 260 },
+      { seconds: 604800, gems: 1000 },
+    ]);
+  });
+
+  it('accepts a boundary configuration at both limits', () => {
+    expect(MAX_SPEED_UP_SECONDS * 1000).toBe(9_007_199_254_740_000);
+    expect(Number.isSafeInteger(MAX_SPEED_UP_SECONDS * 1000)).toBe(true);
+
+    const raw = withSpeedUp([
+      { seconds: 1, gems: 1 },
+      { seconds: MAX_SPEED_UP_SECONDS, gems: MAX_SPEED_UP_GEMS },
+    ]);
+    const config = validateGameConfig(raw);
+    expect(config.economy.speedUp.anchors[1]).toEqual({
+      seconds: MAX_SPEED_UP_SECONDS,
+      gems: MAX_SPEED_UP_GEMS,
+    });
+  });
+
+  it('accepts a minimumGems at the safe-integer limit', () => {
+    const raw = withSpeedUp(
+      [
+        { seconds: 1, gems: MAX_SPEED_UP_GEMS },
+        { seconds: 2, gems: MAX_SPEED_UP_GEMS },
+      ],
+      MAX_SPEED_UP_GEMS,
+    );
+    expect(() => validateGameConfig(raw)).not.toThrow();
+  });
+
+  it('rejects one second past the safe millisecond span', () => {
+    expect(Number.isSafeInteger((MAX_SPEED_UP_SECONDS + 1) * 1000)).toBe(false);
+
+    const raw = withSpeedUp([
+      { seconds: 1, gems: 1 },
+      { seconds: MAX_SPEED_UP_SECONDS + 1, gems: 2 },
+    ]);
+    const issues = issuesFor(raw);
+    // The bound is reported by Zod's range check, naming the limit.
+    expect(issues).toContain('9007199254740');
+    expect(issues).toContain('anchors.1.seconds');
+  });
+
+  it('rejects a seconds value far above the finite range', () => {
+    // Number.MAX_VALUE * 1000 === Infinity, which is what made BigInt throw.
+    expect(Number.MAX_VALUE * 1000).toBe(Number.POSITIVE_INFINITY);
+
+    const raw = withSpeedUp([
+      { seconds: 1, gems: 1 },
+      { seconds: Number.MAX_VALUE, gems: 2 },
+    ]);
+    expect(issuesFor(raw)).toContain('anchors.1.seconds');
+  });
+
+  it('rejects an anchor price one past the safe integer', () => {
+    const raw = withSpeedUp([
+      { seconds: 1, gems: 1 },
+      { seconds: 2, gems: MAX_SPEED_UP_GEMS + 1 },
+    ]);
+    expect(issuesFor(raw)).toContain('anchors.1.gems');
+  });
+
+  it('rejects a minimumGems one past the safe integer', () => {
+    const raw = withSpeedUp(
+      [
+        { seconds: 1, gems: 1 },
+        { seconds: 2, gems: 2 },
+      ],
+      MAX_SPEED_UP_GEMS + 1,
+    );
+    expect(issuesFor(raw)).toContain('minimumGems');
+  });
+
+  it('rejects a negative anchor price before the range check', () => {
+    const raw = withSpeedUp([
+      { seconds: 1, gems: -1 },
+      { seconds: 2, gems: 2 },
+    ]);
+    expect(issuesFor(raw)).toContain('anchors.0.gems');
   });
 });

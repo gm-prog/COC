@@ -39,6 +39,27 @@ export const KEEP_BUILDING_ID = 'keep';
  */
 export const MAX_BUILDERS = 5;
 
+/**
+ * The largest span, in seconds, a speed-up anchor may declare.
+ *
+ * `speedUpCost` converts anchor seconds to milliseconds (`seconds * 1000`) before
+ * comparing them with the remaining duration, so the converted value must be an
+ * exact integer. `Math.floor(MAX_SAFE_INTEGER / 1000)` is the largest second
+ * count whose millisecond form is still safe: one more second makes the product
+ * a non-safe integer (silently rounded, off by 24 ms at the limit), and a
+ * hand-built config far enough above it produces `Infinity`, which `BigInt`
+ * refuses to convert.
+ */
+export const MAX_SPEED_UP_SECONDS = Math.floor(Number.MAX_SAFE_INTEGER / 1000);
+
+/**
+ * The largest gem price a speed-up anchor, or the `minimumGems` floor, may carry.
+ *
+ * The interpolation itself runs in BigInt, but the result is returned as a
+ * normal number, so the configured price has to be exactly representable.
+ */
+export const MAX_SPEED_UP_GEMS = Number.MAX_SAFE_INTEGER;
+
 export interface BuildingSize {
   w: number;
   h: number;

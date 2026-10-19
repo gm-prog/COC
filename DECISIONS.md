@@ -390,3 +390,30 @@ half-up rounding — `floor((2n + span) / (2 * span))` — which is exactly `Mat
 non-negative prices the validator admits, and stays exact for any schema-valid anchor pair
 where `deltaGems * offsetMs` would exceed `Number.MAX_SAFE_INTEGER`. Anchors, prices and the
 final `minimumGems` rule are unchanged.
+
+## D33 · 2026-10-19 · Speed-up anchors are bounded by their arithmetic, not by taste
+
+`speedUpCost` converts anchor seconds to milliseconds (`seconds * 1000`) and feeds
+`deltaGems * offsetMs` and `span` to `BigInt`. Two things therefore have to be true of a
+schema-valid anchor, and neither was checked:
+
+- `seconds * 1000` must be an exact integer. `MAX_SPEED_UP_SECONDS` is
+  `Math.floor(Number.MAX_SAFE_INTEGER / 1000)` = 9,007,199,254,740. One second more and the
+  product is no longer safe: at `Number.MAX_SAFE_INTEGER` seconds it is 24 ms low, so the
+  interpolation is silently wrong rather than loudly broken.
+- Prices must be exactly representable, because the interpolated result is returned as a
+  normal number. `MAX_SPEED_UP_GEMS` is `Number.MAX_SAFE_INTEGER`, applied to both anchor
+  `gems` and `minimumGems`.
+
+The bounds live in `config/types.ts` beside the other game-rule constants and are enforced by
+the Zod schema, so an out-of-range table is rejected at load with the limit named — never
+clamped.
+
+Worth recording precisely, because the review report described it slightly differently: with
+the Zod 4 `.int()` in use, a non-safe integer was already rejected, so `Infinity` was not
+reachable _through_ `validateGameConfig`. The reachable defects were the silent 24 ms
+inaccuracy at large-but-accepted seconds, and a real `RangeError` from `BigInt(Infinity)` for
+a config assembled in code — which is exactly the case D29 says must still be coherent. The
+explicit bounds fix both and stop depending on a validator implementation detail.
+
+Anchors, prices, interpolation, half-up rounding and the `minimumGems` rule are unchanged.

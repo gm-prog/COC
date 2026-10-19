@@ -9,7 +9,13 @@
 
 import { z } from 'zod';
 import { GRID } from '../config/geometry.js';
-import { KEEP_BUILDING_ID, MAX_BUILDERS, type GameConfig } from '../config/types.js';
+import {
+  KEEP_BUILDING_ID,
+  MAX_BUILDERS,
+  MAX_SPEED_UP_GEMS,
+  MAX_SPEED_UP_SECONDS,
+  type GameConfig,
+} from '../config/types.js';
 import { isValidRect, rectsOverlap, type Rect } from '../grid/index.js';
 
 export class ConfigValidationError extends Error {
@@ -137,10 +143,14 @@ const StarterConfigSchema = z
   })
   .strict();
 
+// The upper bounds are the arithmetic's, not the game's: `speedUpCost`
+// multiplies seconds by 1,000 and converts the result to BigInt, so a value
+// past these limits would either be rounded silently or throw. Rejecting it
+// here keeps a bad table visible at load time instead of as a wrong price.
 const SpeedUpAnchorSchema = z
   .object({
-    seconds: z.number().int().positive(),
-    gems: z.number().int().nonnegative(),
+    seconds: z.number().int().positive().max(MAX_SPEED_UP_SECONDS),
+    gems: z.number().int().nonnegative().max(MAX_SPEED_UP_GEMS),
   })
   .strict();
 
@@ -149,7 +159,7 @@ const EconomyConfigSchema = z
     speedUp: z
       .object({
         anchors: z.array(SpeedUpAnchorSchema).min(2),
-        minimumGems: z.number().int().positive(),
+        minimumGems: z.number().int().positive().max(MAX_SPEED_UP_GEMS),
       })
       .strict(),
     builders: z

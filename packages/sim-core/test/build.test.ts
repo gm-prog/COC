@@ -11,6 +11,7 @@ import {
   upgradeDurationMs,
 } from '../src/build/index.js';
 import { createNewPlayerState, type PlayerState } from '../src/state/index.js';
+import { MAX_SPEED_UP_SECONDS } from '../src/config/types.js';
 import { NOW, TEST_CONFIG } from './fixtures/config.js';
 
 const config = TEST_CONFIG;
@@ -388,5 +389,88 @@ describe('speedUpCost — exact integer interpolation', () => {
       { seconds: 1, gems: 1 },
       { seconds: 3, gems: 2 },
     ]);
+  });
+});
+
+describe('speedUpCost — anchors at the validated arithmetic limit', () => {
+  /**
+   * The largest span validation admits. Its millisecond form is the biggest
+   * exact integer the curve can compare against; one second further would be a
+   * non-safe integer, and a hand-built config far above it becomes `Infinity`,
+   * which `BigInt` refuses.
+   */
+  function atLimitConfig() {
+    const clone = JSON.parse(JSON.stringify(config)) as typeof config;
+    clone.economy.speedUp = {
+      anchors: [
+        { seconds: 1, gems: 1 },
+        { seconds: MAX_SPEED_UP_SECONDS, gems: 2 },
+      ],
+      minimumGems: 1,
+    };
+    return clone;
+  }
+
+  it('keeps the millisecond conversion exact at the limit', () => {
+    const spanMs = MAX_SPEED_UP_SECONDS * 1000 - 1000;
+    expect(Number.isSafeInteger(MAX_SPEED_UP_SECONDS * 1000)).toBe(true);
+    // The span of this test table is even, so the halfway point is an exact
+    // half-gem — which is only true if the product above is exact.
+    expect(spanMs % 2).toBe(0);
+  });
+
+  it('rounds a half gem upward at the limit without throwing', () => {
+    const limit = atLimitConfig();
+    const spanMs = MAX_SPEED_UP_SECONDS * 1000 - 1000;
+    const midpoint = 1000 + spanMs / 2;
+    expect(2 * (midpoint - 1000)).toBe(spanMs);
+
+    expect(() => speedUpCost(midpoint, limit)).not.toThrow();
+    expect(speedUpCost(midpoint, limit)).toBe(2);
+    expect(speedUpCost(midpoint - 1, limit)).toBe(1);
+    expect(speedUpCost(midpoint + 1, limit)).toBe(2);
+  });
+
+  it('still clamps below and above the limit table', () => {
+    const limit = atLimitConfig();
+    expect(speedUpCost(0, limit)).toBe(1);
+    expect(speedUpCost(1000, limit)).toBe(1);
+    expect(speedUpCost(MAX_SPEED_UP_SECONDS * 1000, limit)).toBe(2);
+    expect(speedUpCost(MAX_SPEED_UP_SECONDS * 1000 + 1, limit)).toBe(2);
+    expect(speedUpCost(Number.MAX_SAFE_INTEGER, limit)).toBe(2);
+  });
+
+  it('returns a safe integer everywhere along the limit table', () => {
+    const limit = atLimitConfig();
+    for (const ms of [
+      0,
+      1,
+      1000,
+      1001,
+      5_000_000_000,
+      4_503_599_627_370_500,
+      MAX_SPEED_UP_SECONDS * 1000 - 1,
+      MAX_SPEED_UP_SECONDS * 1000,
+    ]) {
+      const gems = speedUpCost(ms, limit);
+      expect(Number.isSafeInteger(gems), `${ms} ms produced ${gems}`).toBe(true);
+      expect(gems).toBeGreaterThanOrEqual(1);
+      expect(gems).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it('leaves the production curve untouched', () => {
+    // Every production anchor, and the two documented midpoints.
+    for (const [ms, gems] of [
+      [60_000, 1],
+      [3_600_000, 20],
+      [86_400_000, 260],
+      [604_800_000, 1000],
+    ] as [number, number][]) {
+      expect(speedUpCost(ms, config), `${ms} ms`).toBe(gems);
+    }
+    expect(speedUpCost(1_830_000, config)).toBe(11);
+    expect(speedUpCost(1_829_999, config)).toBe(10);
+    expect(speedUpCost(12_345_678, config)).toBe(speedUpCost(12_345_678, config));
   });
 });

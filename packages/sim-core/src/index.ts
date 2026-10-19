@@ -73,6 +73,8 @@ export {
 export {
   KEEP_BUILDING_ID,
   MAX_BUILDERS,
+  MAX_SPEED_UP_GEMS,
+  MAX_SPEED_UP_SECONDS,
   RESOURCE_IDS,
   type ResourceId,
   type ResourceAmount,
