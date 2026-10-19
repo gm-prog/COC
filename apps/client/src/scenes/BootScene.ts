@@ -3,6 +3,8 @@ import { GAME_CONFIG } from '@coc/game-data';
 import { CONFIG_VERSION } from '@coc/game-data/version';
 import { PROTOCOL_VERSION } from '@coc/protocol';
 import {
+  applyCommand,
+  catchUp,
   createNewPlayerState,
   GRID,
   SIM_CORE_VERSION,
@@ -21,6 +23,8 @@ import {
 } from '../cameraTransform';
 import { Hud } from '../hud';
 import { buildVillageHudSnapshot } from '../villageHud';
+import { previewBuildingPlacement } from '../villagePlacement';
+import { listBuildingShopItems } from '../villageShop';
 import {
   findVillageEntityAtTile,
   listVillageEntities,
@@ -103,9 +107,11 @@ export class BootScene extends Phaser.Scene {
   private entityLayer!: Phaser.GameObjects.Graphics;
   private hoverLayer!: Phaser.GameObjects.Graphics;
   private selectLayer!: Phaser.GameObjects.Graphics;
+  private placementLayer!: Phaser.GameObjects.Graphics;
 
   private playerState!: PlayerState;
   private selectedEntity: VillageEntity | null = null;
+  private placementType: string | null = null;
   private transform: CameraTransform = { zoom: 1, panX: 0, panY: 0 };
 
   private panPointerId = -1;
@@ -136,18 +142,32 @@ export class BootScene extends Phaser.Scene {
       simCore: SIM_CORE_VERSION,
       config: CONFIG_VERSION,
     });
+    this.hud.setShopHandlers({
+      onSelectBuilding: (buildingType) => this.beginPlacement(buildingType),
+      onCancelPlacement: () => this.cancelPlacement(),
+    });
 
     this.world = this.add.container(0, 0);
     this.staticLayer = this.add.graphics();
     this.entityLayer = this.add.graphics();
     this.selectLayer = this.add.graphics();
     this.hoverLayer = this.add.graphics();
-    this.world.add([this.staticLayer, this.entityLayer, this.selectLayer, this.hoverLayer]);
+    this.placementLayer = this.add.graphics();
+    this.world.add([
+      this.staticLayer,
+      this.entityLayer,
+      this.selectLayer,
+      this.hoverLayer,
+      this.placementLayer,
+    ]);
 
-    this.playerState = createNewPlayerState(GAME_CONFIG, 0);
+    // Offline client state starts at the real local timestamp; this prevents the
+    // first command from accruing resources since the Unix epoch.
+    this.playerState = createNewPlayerState(GAME_CONFIG, Date.now());
     this.hud.setVillageSnapshot(
       buildVillageHudSnapshot(this.playerState, GAME_CONFIG, Date.now()),
     );
+    this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
     this.drawStaticGrid();
     this.drawVillageEntities();
 
@@ -346,6 +366,7 @@ export class BootScene extends Phaser.Scene {
     this.input.off('wheel', this.onWheel, this);
     this.input.keyboard?.off('keydown', this.onKeyDown, this);
     this.scale.off(Phaser.Scale.Events.RESIZE, this.onResize, this);
+    this.hud.dispose();
   }
 
   private onPointerDown(pointer: Phaser.Input.Pointer): void {
@@ -426,6 +447,10 @@ export class BootScene extends Phaser.Scene {
       case '0':
         this.recenter();
         break;
+      case 'Escape':
+        if (this.placementType !== null) this.cancelPlacement();
+        else this.hud.setShopOpen(false);
+        break;
       case 'ArrowLeft':
         this.panByScreen(panStep, 0);
         break;
@@ -441,7 +466,12 @@ export class BootScene extends Phaser.Scene {
       default:
         break;
     }
-    if (event.key.startsWith('Arrow') || event.key === '+' || event.key === '-') {
+    if (
+      event.key.startsWith('Arrow') ||
+      event.key === '+' ||
+      event.key === '-' ||
+      event.key === 'Escape'
+    ) {
       event.preventDefault();
     }
   }
@@ -473,6 +503,7 @@ export class BootScene extends Phaser.Scene {
         this.hud.clearTile();
         this.hud.clearZone();
       }
+      if (this.placementType !== null) this.redrawPlacementGhost(null);
       return;
     }
     const changed = !this.hoverTile || this.hoverTile.x !== tile.x || this.hoverTile.y !== tile.y;
@@ -481,6 +512,7 @@ export class BootScene extends Phaser.Scene {
       this.redrawHover();
       this.hud.setTile(tile.x, tile.y);
       this.hud.setZone(this.isBuildable(tile));
+      if (this.placementType !== null) this.redrawPlacementGhost(tile);
     }
   }
 
@@ -494,6 +526,11 @@ export class BootScene extends Phaser.Scene {
   }
 
   private selectTileAt(pointer: Phaser.Input.Pointer): void {
+    if (this.placementType !== null) {
+      this.tryPlaceBuildingAt(pointer);
+      return;
+    }
+
     const world = this.pointerToWorld(pointer);
     const tile = screenToTileFloor(world.x, world.y);
     if (!this.isInsideMap(tile)) {
@@ -537,6 +574,147 @@ export class BootScene extends Phaser.Scene {
     }
   }
 
+  private getNow(): number {
+    return Math.max(Date.now(), this.playerState.lastSyncAt);
+  }
+
+  private beginPlacement(buildingType: string): void {
+    const item = listBuildingShopItems(this.playerState, GAME_CONFIG).find(
+      (candidate) => candidate.id === buildingType,
+    );
+    if (!item || item.reason !== null) {
+      this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
+      return;
+    }
+
+    this.placementType = buildingType;
+    this.selectedEntity = null;
+    this.selectedTile = null;
+    this.redrawSelection();
+    this.hud.setSelection(null);
+    this.hud.setPlacementMode(buildingType);
+    this.redrawPlacementGhost(this.hoverTile);
+  }
+
+  private cancelPlacement(): void {
+    this.placementType = null;
+    this.placementLayer.clear();
+    this.hud.setPlacementMode(null);
+    this.hud.setHint();
+  }
+
+  private redrawPlacementGhost(tile: Tile | null): void {
+    this.placementLayer.clear();
+    const buildingType = this.placementType;
+    if (buildingType === null) return;
+    if (tile === null) {
+      this.hud.setPlacementFeedback('outside');
+      return;
+    }
+
+    const definition = GAME_CONFIG.buildings.find((candidate) => candidate.id === buildingType);
+    if (!definition) {
+      this.hud.setPlacementFeedback('invalid');
+      return;
+    }
+
+    const now = this.getNow();
+    const preview = previewBuildingPlacement(
+      this.playerState,
+      GAME_CONFIG,
+      buildingType,
+      tile.x,
+      tile.y,
+      now,
+    );
+    const color = preview.valid ? 0x57d98a : 0xef6a6a;
+    const footprint = tileRectToScreenQuad(
+      tile.x,
+      tile.y,
+      definition.size.w,
+      definition.size.h,
+    );
+    this.placementLayer.fillStyle(color, 0.2);
+    this.placementLayer.fillPoints(footprint, true);
+    this.placementLayer.lineStyle(3, color, 1);
+    this.placementLayer.strokePoints(footprint, true);
+    this.hud.setPlacementFeedback(preview.valid ? 'valid' : 'invalid');
+  }
+
+  private tryPlaceBuildingAt(pointer: Phaser.Input.Pointer): void {
+    const world = this.pointerToWorld(pointer);
+    const tile = screenToTileFloor(world.x, world.y);
+    if (!this.isInsideMap(tile)) {
+      this.hud.setPlacementFeedback('outside');
+      return;
+    }
+
+    this.hoverTile = tile;
+    this.redrawHover();
+    this.hud.setTile(tile.x, tile.y);
+    this.hud.setZone(this.isBuildable(tile));
+    this.redrawPlacementGhost(tile);
+
+    const buildingType = this.placementType;
+    if (buildingType === null) return;
+
+    const now = this.getNow();
+    const result = applyCommand(
+      this.playerState,
+      {
+        id: 'place-' + now + '-' + buildingType + '-' + tile.x + '-' + tile.y,
+        type: 'PlaceBuilding',
+        payload: { buildingType, x: tile.x, y: tile.y },
+      },
+      { config: GAME_CONFIG, now },
+    );
+    if (!result.ok) {
+      this.hud.setPlacementFeedback('invalid');
+      return;
+    }
+
+    this.playerState = result.state;
+    this.selectedEntity = null;
+    this.selectedTile = null;
+    this.redrawSelection();
+    this.hud.setSelection(null);
+    this.cancelPlacement();
+    this.drawVillageEntities();
+    this.hud.setVillageSnapshot(
+      buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
+    );
+    this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
+  }
+
+  private refreshSelectionAfterCatchUp(): void {
+    const selected = this.selectedEntity;
+    if (!selected) return;
+    const updated = listVillageEntities(this.playerState, GAME_CONFIG).find(
+      (entity) =>
+        entity.kind === selected.kind && entity.instance.id === selected.instance.id,
+    );
+    this.selectedEntity = updated ?? null;
+    this.redrawSelection();
+    if (!updated) {
+      this.hud.setSelection(null);
+    } else if (updated.kind === 'building') {
+      this.hud.setSelection({
+        kind: 'building',
+        id: updated.definition.id,
+        x: updated.instance.x,
+        y: updated.instance.y,
+        level: updated.instance.level,
+      });
+    } else {
+      this.hud.setSelection({
+        kind: 'obstacle',
+        id: updated.definition.id,
+        x: updated.instance.x,
+        y: updated.instance.y,
+      });
+    }
+  }
+
   // ----------------------------------------------------------------- update
 
   override update(_time: number, delta: number): void {
@@ -553,9 +731,21 @@ export class BootScene extends Phaser.Scene {
     // Countdown text is presentation-only; simulation rules still receive an
     // explicit timestamp and never read the wall clock themselves.
     if (this.villageHudElapsed >= 1000) {
-      this.hud.setVillageSnapshot(
-        buildVillageHudSnapshot(this.playerState, GAME_CONFIG, Date.now()),
-      );
+      const now = this.getNow();
+      const caught = catchUp(this.playerState, now, GAME_CONFIG);
+      if (caught.ok) {
+        this.playerState = caught.state;
+        this.hud.setVillageSnapshot(
+          buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
+        );
+
+        if (caught.events.length > 0) {
+          this.drawVillageEntities();
+          this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
+          this.refreshSelectionAfterCatchUp();
+        }
+        if (this.placementType !== null) this.redrawPlacementGhost(this.hoverTile);
+      }
       this.villageHudElapsed = 0;
     }
   }
