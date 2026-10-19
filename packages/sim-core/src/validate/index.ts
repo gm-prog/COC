@@ -8,7 +8,9 @@
  */
 
 import { z } from 'zod';
+import { GRID } from '../config/geometry.js';
 import type { GameConfig } from '../config/types.js';
+import { isValidRect, rectsOverlap, type Rect } from '../grid/index.js';
 
 export class ConfigValidationError extends Error {
   readonly issues: readonly string[];
@@ -51,8 +53,15 @@ const BuildingLevelSchema = z
     cost: ResourceAmountSchema.default({}),
     buildSeconds: z.number().int().nonnegative(),
     requiresKeep: z.number().int().positive(),
-    productionPerHour: z.number().int().nonnegative().optional(),
-    bufferCap: z.number().int().nonnegative().optional(),
+    produces: z.enum(['gold', 'essence', 'shards', 'gems']).optional(),
+    // Bounded so the fixed-point production arithmetic is provably exact: the
+    // largest intermediate is `restMs * productionPerHour * FIXED_ONE`, and
+    // 3,599,999 * 1,000,000 * 1,000 stays inside 2^53 with room to spare.
+    productionPerHour: z.number().int().nonnegative().max(1_000_000).optional(),
+    // D28: the same 1,000,000 ceiling as `productionPerHour`. A larger cap
+    // would let a buffer hold more than the production arithmetic can be
+    // proven exact over, so it is rejected at import rather than at runtime.
+    bufferCap: z.number().int().nonnegative().max(1_000_000).optional(),
     storageCap: ResourceAmountSchema.optional(),
     housing: z.number().int().nonnegative().optional(),
     queueSlots: z.number().int().nonnegative().optional(),
@@ -128,12 +137,52 @@ const StarterConfigSchema = z
   })
   .strict();
 
+const SpeedUpAnchorSchema = z
+  .object({
+    seconds: z.number().int().positive(),
+    gems: z.number().int().nonnegative(),
+  })
+  .strict();
+
+const EconomyConfigSchema = z
+  .object({
+    speedUp: z
+      .object({
+        anchors: z.array(SpeedUpAnchorSchema).min(2),
+        minimumGems: z.number().int().positive(),
+      })
+      .strict(),
+    builders: z
+      .object({
+        maxBuilders: z.number().int().positive(),
+        costs: z.array(ResourceAmountSchema).min(1),
+      })
+      .strict(),
+    cancelRefund: z
+      .object({
+        startedUpgrade: z.number().min(0).max(1),
+        queuedItem: z.number().min(0).max(1),
+      })
+      .strict(),
+    msPerHour: z.number().int().positive(),
+  })
+  .strict();
+
+const BuildingLimitsSchema = z
+  .object({
+    maxKeeps: z.number().int().positive(),
+    buildingCounts: z.record(z.string(), z.array(z.number().int().nonnegative())),
+  })
+  .strict();
+
 const GameConfigSchema = z
   .object({
     version: z.string().min(1),
     buildings: z.array(BuildingDefSchema).min(1),
     obstacles: z.array(ObstacleDefSchema).default([]),
     starter: StarterConfigSchema,
+    economy: EconomyConfigSchema,
+    limits: BuildingLimitsSchema,
   })
   .strict();
 
@@ -213,7 +262,7 @@ function isPrimitive(value: unknown): boolean {
 }
 
 /** Checks Zod cannot express: uniqueness, contiguity and cross-references. */
-function checkSemantics(config: GameConfig): string[] {
+export function checkSemantics(config: GameConfig): string[] {
   const issues: string[] = [];
 
   const buildingIds = new Set<string>();
@@ -265,6 +314,9 @@ function checkSemantics(config: GameConfig): string[] {
     }
   }
 
+  const economyIssues = checkEconomy(config);
+  issues.push(...economyIssues);
+
   const obstacleIds = new Set<string>();
   for (const obstacle of config.obstacles) {
     if (obstacleIds.has(obstacle.id)) {
@@ -272,6 +324,8 @@ function checkSemantics(config: GameConfig): string[] {
     }
     obstacleIds.add(obstacle.id);
   }
+
+  issues.push(...checkCollectors(config));
 
   for (const starterBuilding of config.starter.buildings) {
     if (!buildingIds.has(starterBuilding.type)) {
@@ -304,6 +358,248 @@ function checkSemantics(config: GameConfig): string[] {
   }).length;
   if (keepCount !== 1) {
     issues.push(`starter layout must contain exactly one Keep (found ${keepCount})`);
+  }
+
+  issues.push(...checkLimits(config));
+  issues.push(...checkStarterLayout(config));
+
+  return issues;
+}
+
+/**
+ * The quantity rules (spec §7.3) are their own table, separate from
+ * `requiresKeep`. This checks the table is complete and coherent with the
+ * buildings it governs: every building has a row, every row covers every Keep
+ * level the Keep definition supports, index 0 is unused, the HQ row never
+ * exceeds `maxKeeps`, and no row names a building that does not exist.
+ */
+export function checkLimits(config: GameConfig): string[] {
+  const issues: string[] = [];
+  const { maxKeeps, buildingCounts } = config.limits;
+
+  if (maxKeeps !== 1) {
+    issues.push(`limits.maxKeeps must be 1 (this phase supports one Keep), received ${maxKeeps}`);
+  }
+
+  const keepDef = config.buildings.find((building) => building.category === 'hq');
+  const maxKeepLevel = keepDef === undefined ? 0 : keepDef.levels.length;
+  if (keepDef === undefined) {
+    issues.push('config must define exactly one HQ building (category "hq")');
+  }
+
+  for (const building of config.buildings) {
+    const counts = buildingCounts[building.id];
+    if (counts === undefined) {
+      issues.push(`limits.buildingCounts is missing an entry for building "${building.id}"`);
+      continue;
+    }
+    if (counts.length < maxKeepLevel + 1) {
+      issues.push(
+        `limits.buildingCounts["${building.id}"] must cover Keep levels 1..${maxKeepLevel} at indexes 1..${maxKeepLevel}, got ${counts.length} entries`,
+      );
+    }
+    if ((counts[0] ?? 0) !== 0) {
+      issues.push(
+        `limits.buildingCounts["${building.id}"][0] is unused and must be 0, received ${counts[0]}`,
+      );
+    }
+    // Only the HQ row is bounded by `maxKeeps`; other rows are counts of
+    // ordinary buildings and are legitimately larger than one.
+    if (building.id === keepDef?.id) {
+      const aboveCeiling = counts.slice(1).filter((count) => count > maxKeeps);
+      if (aboveCeiling.length > 0) {
+        issues.push(
+          `limits.buildingCounts["${building.id}"] allows more than limits.maxKeeps (${maxKeeps}) at some Keep level`,
+        );
+      }
+    }
+  }
+
+  for (const id of Object.keys(buildingCounts)) {
+    if (!config.buildings.some((building) => building.id === id)) {
+      issues.push(`limits.buildingCounts has an entry for unknown building "${id}"`);
+    }
+  }
+
+  return issues;
+}
+
+/**
+ * Starter footprints: every tile, not just the origin.
+ *
+ * The starter layout is placed by `createNewPlayerState` without going through
+ * the command layer, so a 4×4 Keep at (0,0) would otherwise become a permanent
+ * off-map building that every later placement has to route around. Buildings
+ * must sit wholly inside the buildable core; obstacles only need to sit inside
+ * the map, because the decorative margin is where they belong. Nothing may
+ * overlap anything else.
+ */
+export function checkStarterLayout(config: GameConfig): string[] {
+  const issues: string[] = [];
+  const placed: { label: string; rect: Rect }[] = [];
+
+  const margin = GRID.margin;
+  const coreEnd = GRID.margin + GRID.buildable;
+
+  for (const starter of config.starter.buildings) {
+    const def = config.buildings.find((candidate) => candidate.id === starter.type);
+    if (def === undefined) continue; // reported as an unknown reference already
+    const rect = { x: starter.x, y: starter.y, w: def.size.w, h: def.size.h };
+    if (!isValidRect(rect)) {
+      issues.push(
+        `starter building "${starter.type}" has malformed geometry ${JSON.stringify(rect)}`,
+      );
+      continue;
+    }
+    if (
+      rect.x < margin ||
+      rect.y < margin ||
+      rect.x + rect.w > coreEnd ||
+      rect.y + rect.h > coreEnd
+    ) {
+      issues.push(
+        `starter building "${starter.type}" at (${rect.x},${rect.y}) with footprint ${rect.w}x${rect.h} leaves the ${GRID.buildable}x${GRID.buildable} buildable core`,
+      );
+    }
+    placed.push({ label: `starter building "${starter.type}"`, rect });
+  }
+
+  for (const starter of config.starter.obstacles) {
+    const def = config.obstacles.find((candidate) => candidate.id === starter.type);
+    if (def === undefined) continue;
+    const rect = { x: starter.x, y: starter.y, w: def.size.w, h: def.size.h };
+    if (!isValidRect(rect)) {
+      issues.push(
+        `starter obstacle "${starter.type}" has malformed geometry ${JSON.stringify(rect)}`,
+      );
+      continue;
+    }
+    if (rect.x < 0 || rect.y < 0 || rect.x + rect.w > GRID.total || rect.y + rect.h > GRID.total) {
+      issues.push(
+        `starter obstacle "${starter.type}" at (${rect.x},${rect.y}) with footprint ${rect.w}x${rect.h} leaves the ${GRID.total}x${GRID.total} map`,
+      );
+    }
+    placed.push({ label: `starter obstacle "${starter.type}"`, rect });
+  }
+
+  for (let i = 0; i < placed.length; i += 1) {
+    for (let j = i + 1; j < placed.length; j += 1) {
+      const a = placed[i] as (typeof placed)[number];
+      const b = placed[j] as (typeof placed)[number];
+      if (rectsOverlap(a.rect, b.rect)) {
+        issues.push(`${a.label} overlaps ${b.label}`);
+      }
+    }
+  }
+
+  return issues;
+}
+
+/**
+ * A collector must name the resource it produces and must be able to hold it —
+ * otherwise production has nowhere to go and the rules would have to guess.
+ */
+function checkCollectors(config: GameConfig): string[] {
+  const issues: string[] = [];
+  for (const building of config.buildings) {
+    for (const level of building.levels) {
+      if (level.productionPerHour !== undefined && level.productionPerHour > 0) {
+        if (level.produces === undefined) {
+          issues.push(
+            `building "${building.id}" level ${level.level} produces ${level.productionPerHour}/hour but does not say which resource`,
+          );
+        }
+        if (level.bufferCap === undefined) {
+          issues.push(
+            `building "${building.id}" level ${level.level} produces ${level.productionPerHour}/hour but has no bufferCap`,
+          );
+        }
+      }
+      if (level.bufferCap !== undefined && level.produces === undefined) {
+        issues.push(
+          `building "${building.id}" level ${level.level} has a bufferCap but does not say which resource it buffers`,
+        );
+      }
+    }
+  }
+  return issues;
+}
+
+/** Checks the economy block: anchor ordering, builder prices, refund fractions. */
+export function checkEconomy(config: GameConfig): string[] {
+  const issues: string[] = [];
+  const { speedUp, builders, cancelRefund, msPerHour } = config.economy;
+
+  const anchors = speedUp.anchors;
+  for (let i = 1; i < anchors.length; i += 1) {
+    const previous = anchors[i - 1] as (typeof anchors)[number];
+    const current = anchors[i] as (typeof anchors)[number];
+    if (current.seconds <= previous.seconds) {
+      issues.push(
+        `economy.speedUp.anchors must be strictly ascending by seconds, got ${previous.seconds} then ${current.seconds}`,
+      );
+    }
+    if (current.gems < previous.gems) {
+      issues.push(
+        `economy.speedUp.anchors must be non-decreasing by gems, got ${previous.gems} then ${current.gems}`,
+      );
+    }
+  }
+  if (anchors[0]?.gems !== undefined && speedUp.minimumGems > anchors[0].gems) {
+    issues.push(
+      `economy.speedUp.minimumGems (${speedUp.minimumGems}) exceeds the cheapest anchor (${anchors[0].gems})`,
+    );
+  }
+
+  if (builders.maxBuilders < config.starter.builders) {
+    issues.push(
+      `economy.builders.maxBuilders (${builders.maxBuilders}) is below the starter builder count (${config.starter.builders})`,
+    );
+  }
+  // The shop sells (maxBuilders - starter.builders) builders, one price each.
+  // Deriving the expected length from the configuration keeps this correct when
+  // a designer changes either number.
+  const expectedCosts = builders.maxBuilders - config.starter.builders;
+  if (builders.costs.length !== expectedCosts) {
+    issues.push(
+      `economy.builders.costs must contain exactly ${expectedCosts} entries (maxBuilders ${builders.maxBuilders} minus starter builders ${config.starter.builders}), got ${builders.costs.length}`,
+    );
+  }
+
+  for (const [index, cost] of builders.costs.entries()) {
+    for (const [resource, amount] of Object.entries(cost)) {
+      if (amount === undefined) continue;
+      if (resource !== 'gems') {
+        issues.push(
+          `economy.builders.costs[${index}].${resource} is not supported: builders are bought with gems only`,
+        );
+      }
+      if (!Number.isInteger(amount)) {
+        issues.push(
+          `economy.builders.costs[${index}].${resource} must be an integer, received ${amount}`,
+        );
+      } else if (amount <= 0) {
+        issues.push(
+          `economy.builders.costs[${index}].${resource} must be positive, received ${amount}`,
+        );
+      }
+    }
+    if (cost.gems === undefined) {
+      issues.push(`economy.builders.costs[${index}] must have a gems price`);
+    }
+    if (Object.keys(cost).length === 0) {
+      issues.push(`economy.builders.costs[${index}] is empty`);
+    }
+  }
+
+  for (const [field, value] of Object.entries(cancelRefund)) {
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+      issues.push(`economy.cancelRefund.${field} must be a fraction in [0, 1], received ${value}`);
+    }
+  }
+
+  if (msPerHour !== 3_600_000) {
+    issues.push(`economy.msPerHour must be 3,600,000, received ${msPerHour}`);
   }
 
   return issues;

@@ -2,146 +2,432 @@
   {
     "id": "keep",
     "category": "hq",
-    "size": { "w": 4, "h": 4 },
-    "unlock": { "keepLevel": 1 },
+    "size": {
+      "w": 4,
+      "h": 4
+    },
+    "unlock": {
+      "keepLevel": 1
+    },
     "levels": [
       {
         "level": 1,
         "hp": 1500,
-        "cost": {},
+        "cost": {
+          "gold": 1000,
+          "essence": 1000
+        },
         "buildSeconds": 0,
         "requiresKeep": 1,
-        "storageCap": { "gold": 1000, "essence": 1000 }
+        "storageCap": {
+          "gold": 1000,
+          "essence": 1000
+        }
       },
       {
         "level": 2,
-        "hp": 2200,
-        "cost": { "gold": 1000, "essence": 1000 },
+        "hp": 2100,
+        "cost": {
+          "gold": 1550,
+          "essence": 1550
+        },
         "buildSeconds": 300,
         "requiresKeep": 1,
-        "storageCap": { "gold": 2000, "essence": 2000 }
+        "storageCap": {
+          "gold": 1600,
+          "essence": 1600
+        }
+      },
+      {
+        "level": 3,
+        "hp": 2940,
+        "cost": {
+          "gold": 2400,
+          "essence": 2400
+        },
+        "buildSeconds": 1800,
+        "requiresKeep": 1,
+        "storageCap": {
+          "gold": 2560,
+          "essence": 2560
+        }
+      },
+      {
+        "level": 4,
+        "hp": 4116,
+        "cost": {
+          "gold": 3720,
+          "essence": 3720
+        },
+        "buildSeconds": 10800,
+        "requiresKeep": 1,
+        "storageCap": {
+          "gold": 4100,
+          "essence": 4100
+        }
+      },
+      {
+        "level": 5,
+        "hp": 5762,
+        "cost": {
+          "gold": 5770,
+          "essence": 5770
+        },
+        "buildSeconds": 43200,
+        "requiresKeep": 1,
+        "storageCap": {
+          "gold": 6550,
+          "essence": 6550
+        }
+      },
+      {
+        "level": 6,
+        "hp": 8067,
+        "cost": {
+          "gold": 8950,
+          "essence": 8950
+        },
+        "buildSeconds": 86400,
+        "requiresKeep": 1,
+        "storageCap": {
+          "gold": 10490,
+          "essence": 10490
+        }
       }
     ]
   },
   {
     "id": "gold_mine",
     "category": "economy",
-    "size": { "w": 3, "h": 3 },
-    "unlock": { "keepLevel": 1 },
+    "size": {
+      "w": 3,
+      "h": 3
+    },
+    "unlock": {
+      "keepLevel": 1
+    },
     "levels": [
       {
         "level": 1,
         "hp": 300,
-        "cost": { "gold": 150 },
+        "cost": {
+          "gold": 150
+        },
         "buildSeconds": 20,
         "requiresKeep": 1,
+        "produces": "gold",
         "productionPerHour": 240,
         "bufferCap": 600
       },
       {
         "level": 2,
         "hp": 420,
-        "cost": { "gold": 250 },
-        "buildSeconds": 60,
+        "cost": {
+          "gold": 230
+        },
+        "buildSeconds": 32,
+        "requiresKeep": 1,
+        "produces": "gold",
+        "productionPerHour": 360,
+        "bufferCap": 900
+      },
+      {
+        "level": 3,
+        "hp": 588,
+        "cost": {
+          "gold": 360
+        },
+        "buildSeconds": 51,
         "requiresKeep": 2,
-        "productionPerHour": 400,
-        "bufferCap": 1000
+        "produces": "gold",
+        "productionPerHour": 540,
+        "bufferCap": 1350
+      },
+      {
+        "level": 4,
+        "hp": 823,
+        "cost": {
+          "gold": 560
+        },
+        "buildSeconds": 82,
+        "requiresKeep": 3,
+        "produces": "gold",
+        "productionPerHour": 810,
+        "bufferCap": 2025
+      },
+      {
+        "level": 5,
+        "hp": 1152,
+        "cost": {
+          "gold": 870
+        },
+        "buildSeconds": 131,
+        "requiresKeep": 4,
+        "produces": "gold",
+        "productionPerHour": 1215,
+        "bufferCap": 3038
+      },
+      {
+        "level": 6,
+        "hp": 1613,
+        "cost": {
+          "gold": 1340
+        },
+        "buildSeconds": 210,
+        "requiresKeep": 5,
+        "produces": "gold",
+        "productionPerHour": 1823,
+        "bufferCap": 4556
       }
     ]
   },
   {
     "id": "essence_well",
     "category": "economy",
-    "size": { "w": 3, "h": 3 },
-    "unlock": { "keepLevel": 1 },
+    "size": {
+      "w": 3,
+      "h": 3
+    },
+    "unlock": {
+      "keepLevel": 1
+    },
     "levels": [
       {
         "level": 1,
         "hp": 300,
-        "cost": { "essence": 150 },
+        "cost": {
+          "essence": 150
+        },
         "buildSeconds": 20,
         "requiresKeep": 1,
+        "produces": "essence",
         "productionPerHour": 240,
         "bufferCap": 600
       },
       {
         "level": 2,
         "hp": 420,
-        "cost": { "essence": 250 },
-        "buildSeconds": 60,
+        "cost": {
+          "essence": 230
+        },
+        "buildSeconds": 32,
+        "requiresKeep": 1,
+        "produces": "essence",
+        "productionPerHour": 360,
+        "bufferCap": 900
+      },
+      {
+        "level": 3,
+        "hp": 588,
+        "cost": {
+          "essence": 360
+        },
+        "buildSeconds": 51,
         "requiresKeep": 2,
-        "productionPerHour": 400,
-        "bufferCap": 1000
+        "produces": "essence",
+        "productionPerHour": 540,
+        "bufferCap": 1350
+      },
+      {
+        "level": 4,
+        "hp": 823,
+        "cost": {
+          "essence": 560
+        },
+        "buildSeconds": 82,
+        "requiresKeep": 3,
+        "produces": "essence",
+        "productionPerHour": 810,
+        "bufferCap": 2025
+      },
+      {
+        "level": 5,
+        "hp": 1152,
+        "cost": {
+          "essence": 870
+        },
+        "buildSeconds": 131,
+        "requiresKeep": 4,
+        "produces": "essence",
+        "productionPerHour": 1215,
+        "bufferCap": 3038
+      },
+      {
+        "level": 6,
+        "hp": 1613,
+        "cost": {
+          "essence": 1340
+        },
+        "buildSeconds": 210,
+        "requiresKeep": 5,
+        "produces": "essence",
+        "productionPerHour": 1823,
+        "bufferCap": 4556
       }
     ]
   },
   {
     "id": "gold_store",
     "category": "storage",
-    "size": { "w": 3, "h": 3 },
-    "unlock": { "keepLevel": 1 },
+    "size": {
+      "w": 3,
+      "h": 3
+    },
+    "unlock": {
+      "keepLevel": 1
+    },
     "levels": [
       {
         "level": 1,
         "hp": 500,
-        "cost": { "gold": 200 },
+        "cost": {
+          "gold": 200
+        },
         "buildSeconds": 30,
         "requiresKeep": 1,
-        "storageCap": { "gold": 2500 }
+        "storageCap": {
+          "gold": 2500
+        }
       },
       {
         "level": 2,
         "hp": 700,
-        "cost": { "gold": 350 },
-        "buildSeconds": 90,
+        "cost": {
+          "gold": 310
+        },
+        "buildSeconds": 48,
+        "requiresKeep": 1,
+        "storageCap": {
+          "gold": 5000
+        }
+      },
+      {
+        "level": 3,
+        "hp": 980,
+        "cost": {
+          "gold": 480
+        },
+        "buildSeconds": 77,
         "requiresKeep": 2,
-        "storageCap": { "gold": 5000 }
+        "storageCap": {
+          "gold": 10000
+        }
       }
     ]
   },
   {
     "id": "essence_store",
     "category": "storage",
-    "size": { "w": 3, "h": 3 },
-    "unlock": { "keepLevel": 1 },
+    "size": {
+      "w": 3,
+      "h": 3
+    },
+    "unlock": {
+      "keepLevel": 1
+    },
     "levels": [
       {
         "level": 1,
         "hp": 500,
-        "cost": { "essence": 200 },
+        "cost": {
+          "essence": 200
+        },
         "buildSeconds": 30,
         "requiresKeep": 1,
-        "storageCap": { "essence": 2500 }
+        "storageCap": {
+          "essence": 2500
+        }
       },
       {
         "level": 2,
         "hp": 700,
-        "cost": { "essence": 350 },
-        "buildSeconds": 90,
+        "cost": {
+          "essence": 310
+        },
+        "buildSeconds": 48,
+        "requiresKeep": 1,
+        "storageCap": {
+          "essence": 5000
+        }
+      },
+      {
+        "level": 3,
+        "hp": 980,
+        "cost": {
+          "essence": 480
+        },
+        "buildSeconds": 77,
         "requiresKeep": 2,
-        "storageCap": { "essence": 5000 }
+        "storageCap": {
+          "essence": 10000
+        }
       }
     ]
   },
   {
     "id": "wall",
     "category": "wall",
-    "size": { "w": 1, "h": 1 },
-    "unlock": { "keepLevel": 2 },
+    "size": {
+      "w": 1,
+      "h": 1
+    },
+    "unlock": {
+      "keepLevel": 2
+    },
     "levels": [
       {
         "level": 1,
         "hp": 300,
-        "cost": { "gold": 10 },
+        "cost": {
+          "gold": 10
+        },
         "buildSeconds": 5,
-        "requiresKeep": 2
+        "requiresKeep": 1
       },
       {
         "level": 2,
         "hp": 420,
-        "cost": { "gold": 20 },
-        "buildSeconds": 10,
+        "cost": {
+          "gold": 20
+        },
+        "buildSeconds": 8,
+        "requiresKeep": 1
+      },
+      {
+        "level": 3,
+        "hp": 588,
+        "cost": {
+          "gold": 20
+        },
+        "buildSeconds": 13,
         "requiresKeep": 2
+      },
+      {
+        "level": 4,
+        "hp": 823,
+        "cost": {
+          "gold": 40
+        },
+        "buildSeconds": 20,
+        "requiresKeep": 3
+      },
+      {
+        "level": 5,
+        "hp": 1152,
+        "cost": {
+          "gold": 60
+        },
+        "buildSeconds": 33,
+        "requiresKeep": 4
+      },
+      {
+        "level": 6,
+        "hp": 1613,
+        "cost": {
+          "gold": 90
+        },
+        "buildSeconds": 52,
+        "requiresKeep": 5
       }
     ]
   }

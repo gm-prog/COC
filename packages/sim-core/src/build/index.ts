@@ -1,0 +1,259 @@
+/**
+ * Construction rules: upgrade eligibility, cancellation refunds, speed-up
+ * pricing and the builder shop.
+ *
+ * Every number here comes from the validated config — no prices, durations,
+ * caps or gem costs are hard-coded. The functions are pure: they never mutate
+ * the state they are handed, so a command can check first and only clone once
+ * it knows the action is legal.
+ */
+
+import type {
+  BuildingDef,
+  BuildingLevel,
+  GameConfig,
+  ResourceAmount,
+  ResourceId,
+} from '../config/types.js';
+import type { PlayerState } from '../state/index.js';
+
+/** Why an upgrade cannot start, in the order the checks run. */
+export type UpgradeRejection =
+  | 'not_found'
+  | 'unknown_building'
+  | 'already_upgrading'
+  | 'max_level'
+  | 'keep_level_too_low'
+  | 'insufficient_resources'
+  | 'no_builder';
+
+export type UpgradeCheck =
+  | { ok: true; def: BuildingDef; target: BuildingLevel }
+  | { ok: false; rejection: UpgradeRejection; message: string; missing?: ResourceAmount };
+
+/** The level table entry for `level`, or undefined when it does not exist. */
+export function currentLevel(
+  config: GameConfig,
+  buildingType: string,
+  level: number,
+): BuildingLevel | undefined {
+  return buildingTable(config, buildingType)?.levels.find((entry) => entry.level === level);
+}
+
+/** The level table entry one above `level`, or undefined at the maximum. */
+export function nextLevel(
+  config: GameConfig,
+  buildingType: string,
+  level: number,
+): BuildingLevel | undefined {
+  return buildingTable(config, buildingType)?.levels.find((entry) => entry.level === level + 1);
+}
+
+function buildingTable(config: GameConfig, buildingType: string): BuildingDef | undefined {
+  return config.buildings.find((candidate) => candidate.id === buildingType);
+}
+
+/** How long an upgrade to `targetLevel` takes, in milliseconds. */
+export function upgradeDurationMs(
+  config: GameConfig,
+  buildingType: string,
+  targetLevel: number,
+): number {
+  const level = currentLevel(config, buildingType, targetLevel);
+  return level === undefined ? 0 : level.buildSeconds * 1000;
+}
+
+/**
+ * Decides whether `buildingId` may start its next level right now.
+ *
+ * The order is deliberate and stable: identity, then the building itself, then
+ * its own progress, then the Keep gate, then cost, then builder availability.
+ * Reporting the Keep gate before the cost means a player who is both too poor
+ * and too low-level is told the thing that actually blocks them, rather than
+ * being told to go and earn resources they still could not spend.
+ */
+export function checkUpgrade(
+  state: PlayerState,
+  buildingId: number,
+  config: GameConfig,
+): UpgradeCheck {
+  const building = state.buildings.find((candidate) => candidate.id === buildingId);
+  if (building === undefined) {
+    return { ok: false, rejection: 'not_found', message: `no building with id ${buildingId}` };
+  }
+
+  const def = buildingTable(config, building.type);
+  if (def === undefined) {
+    return {
+      ok: false,
+      rejection: 'unknown_building',
+      message: `building "${building.type}" is not defined in the config`,
+    };
+  }
+
+  if (building.upgrade !== undefined) {
+    return {
+      ok: false,
+      rejection: 'already_upgrading',
+      message: `building ${building.id} is already upgrading to level ${building.upgrade.toLevel}`,
+    };
+  }
+
+  const target = def.levels.find((entry) => entry.level === building.level + 1);
+  if (target === undefined) {
+    return {
+      ok: false,
+      rejection: 'max_level',
+      message: `building ${building.id} ("${def.id}") is already at its maximum level ${building.level}`,
+    };
+  }
+
+  // Keep gating (spec 7.3). A building's level 1 is always available; higher
+  // levels are unlocked by the Keep level recorded on the target row.
+  const requiredKeep = target.requiresKeep ?? 1;
+  if (requiredKeep > state.keepLevel) {
+    return {
+      ok: false,
+      rejection: 'keep_level_too_low',
+      message: `"${def.id}" level ${target.level} requires Keep ${requiredKeep}, you are on Keep ${state.keepLevel}`,
+    };
+  }
+
+  const missing = missingResources(state, target.cost);
+  if (missing !== undefined) {
+    return {
+      ok: false,
+      rejection: 'insufficient_resources',
+      message: `"${def.id}" level ${target.level} costs ${describeCost(target.cost)}`,
+      missing,
+    };
+  }
+
+  if (state.builders.busy.length >= state.builders.count) {
+    return {
+      ok: false,
+      rejection: 'no_builder',
+      message: `all ${state.builders.count} builders are busy`,
+    };
+  }
+
+  return { ok: true, def, target };
+}
+
+/** The resources still needed to afford `cost`, or undefined when affordable. */
+function missingResources(state: PlayerState, cost: ResourceAmount): ResourceAmount | undefined {
+  const missing: ResourceAmount = {};
+  for (const [resource, amount] of Object.entries(cost)) {
+    if (amount === undefined || amount === 0) continue;
+    const have = state.resources[resource as ResourceId] ?? 0;
+    if (have < amount) missing[resource as ResourceId] = amount - have;
+  }
+  return Object.keys(missing).length === 0 ? undefined : missing;
+}
+
+function describeCost(cost: ResourceAmount): string {
+  const parts = Object.entries(cost)
+    .filter(([, amount]) => amount !== undefined && amount !== 0)
+    .map(([resource, amount]) => `${amount} ${resource}`);
+  return parts.length === 0 ? 'nothing' : parts.join(' + ');
+}
+
+/**
+ * Spec 7.5: cancelling refunds nothing once a builder has started the work, and
+ * the configured fraction for an item that was paid for but never began.
+ */
+export function cancelRefundFraction(config: GameConfig, started: boolean): number {
+  return started
+    ? config.economy.cancelRefund.startedUpgrade
+    : config.economy.cancelRefund.queuedItem;
+}
+
+/**
+ * The resources returned when an upgrade to `targetLevel` is cancelled.
+ *
+ * `started` distinguishes work a builder has actually begun (refunds nothing)
+ * from an item that was paid for but never began (refunds the configured
+ * queued fraction). Callers default it to `true`; the queued branch becomes
+ * reachable once the builder queue lands in Phase 4.
+ */
+export function refundFor(
+  config: GameConfig,
+  buildingType: string,
+  targetLevel: number,
+  started = true,
+): ResourceAmount {
+  const target = currentLevel(config, buildingType, targetLevel);
+  if (!target) return {};
+
+  const fraction = cancelRefundFraction(config, started);
+  const refund: ResourceAmount = {};
+  for (const [resource, amount] of Object.entries(target.cost)) {
+    if (amount === undefined || amount === 0) continue;
+    // Floor, so a fractional refund can never mint a resource the player did
+    // not have.
+    const value = Math.floor(amount * fraction);
+    if (value > 0) refund[resource as ResourceId] = value;
+  }
+  return refund;
+}
+
+/**
+ * Spec 7.5: the gem price of skipping `remainingMs` is piecewise-linear in the
+ * remaining seconds between the configured anchors, clamped outside them and
+ * never below `minimumGems`.
+ *
+ * This is transcribed from the anchor table, not approximated by a single
+ * slope: between 60 s and 1 h the curve rises 19 gems, between 1 h and 1 d it
+ * rises 240, and between 1 d and 7 d it rises 740. A linear fit across the
+ * whole range would be wrong by an order of magnitude at both ends.
+ */
+export function speedUpCost(remainingMs: number, config: GameConfig): number {
+  const { anchors, minimumGems } = config.economy.speedUp;
+  if (!Number.isFinite(remainingMs) || anchors.length === 0) return minimumGems;
+
+  // Defensive copy: the validator enforces ascending anchors, but this function
+  // is pure and must not depend on that for its own correctness.
+  const table = [...anchors].sort((a, b) => a.seconds - b.seconds);
+  const ms = Math.max(0, Math.floor(remainingMs));
+
+  const first = table[0] as (typeof table)[number];
+  const last = table[table.length - 1] as (typeof table)[number];
+
+  // Below the first anchor: the cheapest anchor's price, never under the minimum.
+  if (ms <= first.seconds * 1000) return Math.max(minimumGems, first.gems);
+
+  // Above the last anchor: flat, rather than extrapolated.
+  if (ms >= last.seconds * 1000) return Math.max(minimumGems, last.gems);
+
+  for (let index = 1; index < table.length; index += 1) {
+    const previous = table[index - 1] as (typeof table)[number];
+    const current = table[index] as (typeof table)[number];
+    const previousMs = previous.seconds * 1000;
+    const currentMs = current.seconds * 1000;
+    if (ms > currentMs) continue;
+
+    const span = currentMs - previousMs;
+    const offset = span <= 0 ? 0 : (ms - previousMs) / span;
+    const interpolated = previous.gems + (current.gems - previous.gems) * offset;
+    return Math.max(minimumGems, Math.round(interpolated));
+  }
+
+  return Math.max(minimumGems, last.gems);
+}
+
+/**
+ * The gem price of the next builder, or undefined when the shop has nothing
+ * left to sell or the player somehow owns fewer than the configured starting
+ * count (which would index the price table negatively).
+ */
+export function nextBuilderCost(state: PlayerState, config: GameConfig): number | undefined {
+  const purchaseIndex = state.builders.count - config.starter.builders;
+  if (purchaseIndex < 0 || purchaseIndex >= config.economy.builders.costs.length) return undefined;
+  const cost = config.economy.builders.costs[purchaseIndex] as ResourceAmount | undefined;
+  return cost?.gems;
+}
+
+/** True when another builder can still be bought. */
+export function canBuyBuilder(state: PlayerState, config: GameConfig): boolean {
+  return state.builders.count < config.economy.builders.maxBuilders;
+}

@@ -12,15 +12,17 @@
 // through the package: sim-core must not depend on game-data (game-data depends
 // on sim-core), and this is a dev script, not shipped code.
 import buildings from '../../game-data/data/buildings.json' with { type: 'json' };
+import economy from '../../game-data/data/economy.json' with { type: 'json' };
 import obstacles from '../../game-data/data/obstacles.json' with { type: 'json' };
 import starter from '../../game-data/data/starter.json' with { type: 'json' };
 import { applyCommand, type GameCommand } from '../src/commands/index.js';
+import { catchUp } from '../src/economy/index.js';
 import { createRng, deserializeRng, nextUint32, serializeRng } from '../src/rng/index.js';
 import { hashState } from '../src/serialize/index.js';
 import { clonePlayerState, createNewPlayerState, type PlayerState } from '../src/state/index.js';
 import { loadGameConfig } from '../src/validate/index.js';
 
-const config = loadGameConfig({ version: '1.0.0', buildings, obstacles, starter });
+const config = loadGameConfig({ version: '1.0.0', buildings, obstacles, economy, starter });
 
 function timed(label: string, run: () => void): void {
   const start = process.hrtime.bigint();
@@ -60,28 +62,37 @@ console.log(`rng: resumed stream matches       ${resumed === original}`);
 /** Distributive `Omit`, so the union keeps its discriminant. */
 type DistributiveOmit<T, K extends keyof never> = T extends unknown ? Omit<T, K> : never;
 
+// Construction occupies a builder for the level-1 build time, so each step is
+// spaced far enough apart for the previous one to have finished.
+const STEP_MS = 60_000;
+
 const commands: readonly DistributiveOmit<GameCommand, 'id'>[] = [
   { type: 'PlaceBuilding', payload: { buildingType: 'gold_mine', x: 26, y: 17 } },
   { type: 'PlaceBuilding', payload: { buildingType: 'gold_mine', x: 30, y: 17 } },
   { type: 'RemoveObstacle', payload: { obstacleId: 4 } },
   { type: 'MoveBuilding', payload: { buildingId: 2, x: 34, y: 34 } },
+  { type: 'CollectResource', payload: { buildingId: 2 } },
 ];
 
-function openVillage(): string {
+function openVillage(): PlayerState {
   let state = createNewPlayerState(config, 0);
   let id = 0;
   for (const command of commands) {
     id += 1;
-    const result = applyCommand(state, { ...command, id: String(id) }, { now: id, config });
+    const result = applyCommand(
+      state,
+      { ...command, id: String(id) },
+      { now: id * STEP_MS, config },
+    );
     if (!result.ok) throw new Error(`command failed: ${result.error.code} ${result.error.message}`);
     state = result.state;
   }
-  return hashState(state);
+  return state;
 }
 
 const hashes: string[] = [];
 timed(`commands: ${OPENINGS} openings x ${commands.length} cmds`, () => {
-  for (let i = 0; i < OPENINGS; i += 1) hashes.push(openVillage());
+  for (let i = 0; i < OPENINGS; i += 1) hashes.push(hashState(openVillage()));
 });
 
 const firstHash = hashes[0] as string;
@@ -99,7 +110,7 @@ const cloneTarget = (): PlayerState => {
     { id: 11, type: 'gold_store', level: 1, x: 30, y: 17 },
   );
   base.obstacles.push({ id: 20, type: 'tree', x: 12, y: 30 });
-  base.builders.busy.push({ buildingId: 10, finishAt: 60_000 });
+  base.builders.busy.push({ buildingId: 10, toLevel: 3, finishAt: 60_000 });
   base.trainingQueues.push({
     barracksId: 12,
     items: [
@@ -126,3 +137,21 @@ timed(`state: ${CLONES.toLocaleString('en-US')} clones`, () => {
   if (hashState(last) !== hashState(state)) throw new Error('clone changed the state');
 });
 console.log(`state: clone checksum              ${cloneChecksum.toString().padStart(8)}`);
+
+// --- Lazy time evaluation ---------------------------------------------------
+// Every mutating command runs catchUp first, so its cost over a long offline
+// window is on the hot path of the whole server.
+const OFFLINE_MS = 8 * 3_600_000;
+const offlineBase = openVillage();
+
+let catchUpChecksum = 0;
+timed(`catchUp: ${OPENINGS} x ${OFFLINE_MS / 3_600_000} h offline`, () => {
+  for (let i = 0; i < OPENINGS; i += 1) {
+    // catchUp is pure, so the same input is reused; the checksum proves the
+    // accrual path actually ran rather than being optimised away.
+    const result = catchUp(offlineBase, OFFLINE_MS, config);
+    if (!result.ok) throw new Error(`catchUp failed: ${result.error.code}`);
+    catchUpChecksum = (catchUpChecksum + result.state.resources.gold) >>> 0;
+  }
+});
+console.log(`catchUp: gold checksum             ${catchUpChecksum.toString().padStart(8)}`);

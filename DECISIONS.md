@@ -248,3 +248,114 @@ narrowed — the property is real and worth enforcing.
 
 - **Impact:** the verification prompt now distinguishes source-verified facts from claims,
   and a reviewer re-running it against the current branch gets the same numbers.
+
+## D25 · 2026-10-19 · The buffer is explicit (`amount`/`remainder`/`lastAccruedAt`), not `bufferStartedAt`
+
+The spec's §8.2 sketch offers `bufferStartedAt?` as the single buffer field. Phase 2 needs
+three things that field cannot express: how much is currently held (so collection is a
+read, not a recomputation), the exact fractional carry (so command frequency cannot change
+production), and a watermark that survives a collection.
+
+- `amount` — whole units held. Capped by `bufferCap`; overflow is discarded, never banked.
+- `remainder` — the exact fractional production still owed, stored as an **integer numerator
+  over `economy.msPerHour`**. This is the part that matters: rounding it to fixed-point per
+  call loses up to a unit per invocation, so six 6,000 ms catch-ups would produce 996
+  fixed-point units where one 36,000 ms call produces 1,000. The exact numerator makes the
+  two indistinguishable, which is what "command frequency must not change output" requires.
+- `lastAccruedAt` — the watermark. Advances even when the buffer is full, which is what makes
+  "time spent full is not banked" true rather than merely asserted.
+
+A collector that has never produced anything keeps `buffer` absent, so a catch-up at the
+current timestamp does not add fields to the state.
+
+## D26 · 2026-10-19 · HP growth is ×1.4 per level, an explicit conservative default
+
+The spec gives no HP curve. It states exactly one level-scaling figure numerically — "Wall:
+Level scaling ×1.4/level" (§7.9) — and ×1.4 is also the ratio the hand-authored tables
+already used. So ×1.4 is used for every building, applied uniformly, with the rationale
+recorded here rather than a silent per-building guess.
+
+This is the most likely number to be revised in playtesting; because it is a single curve
+parameter in `scripts/balance.config.ts`, revising it is a one-line change plus a
+regeneration, not a code change. The generator test asserts the ×1.4 relationship at every
+level, so a deliberate change to the curve fails loudly rather than drifting.
+
+## D27 · 2026-10-19 · `PlaceBuilding` now costs resources and occupies a builder
+
+Phase 1 treated placement as a free, instant layout edit. That contradicts §7.5 ("each
+upgrade/construction occupies one builder until finished") and, more importantly, it broke
+the economy: a player could place unlimited gold stores for nothing and never hit a storage
+cap, which would have made the seven-day playthrough meaningless.
+
+A construction now charges the level-1 cost, occupies a builder for the level-1 build time,
+and records the building at `level: 0` with `upgrade: { toLevel: 1, finishAt }`. Level 0
+contributes no HP, no storage and no production until the builder finishes — which is the
+correct reading of "under construction", and is enforced by `levelDef` returning `undefined`
+for a level the table does not contain.
+
+`MoveBuilding` and `RemoveObstacle` are deliberately **not** changed: §8.3 groups all three
+under "Layout editing", and changing only one of the three would be inconsistent. The config's
+obstacle `removalSeconds` remains unenforced and is recorded as a known gap.
+
+## D28 · 2026-10-19 · `productionPerHour` and `bufferCap` are bounded at 1,000,000
+
+Not a game-design bound — an arithmetic-safety bound. Production is computed as
+`restMs * rate` where `restMs < msPerHour` (3.6e6); at the maximum rate that product stays
+under 3.6e12, comfortably inside the 2^53 exact-integer range. A larger configured rate
+would silently produce non-integer accruals, which is the one failure mode this whole design
+exists to prevent. The bound lives in the schema, so bad balance data is rejected at import
+rather than producing wrong numbers at runtime.
+
+## D29 · 2026-10-19 · `checkSemantics` and `checkEconomy` are exported for direct testing
+
+Several semantic rules are deliberately redundant with the Zod schema (positive builder
+prices, refund fractions in [0, 1]). That redundancy is intentional defense in depth, but it
+made those branches untestable through `validateGameConfig`, because Zod rejects the input
+first. Exporting the checkers lets the semantic layer be unit-tested directly on a
+hand-patched config.
+
+The alternative — deleting the redundant checks — was rejected: the schema is the contract
+for _shape_, the semantic checks are the contract for _coherence_, and a config assembled in
+code rather than parsed from JSON should still be checked for coherence.
+
+## D30 · 2026-10-19 · §7.3's per-building columns are quantity ceilings, not level ceilings
+
+The §7.3 table has one column titled **"Max bldg level"** and eleven per-building columns
+(`Gold Mine`, `Essence Well`, `Gold Store`, `Ess. Store`, `Barracks`, `Camp`, `Ballista`,
+`Watchtower`, `Catapult`, `Skyspear`, `Walls (max)`). The generator originally read the
+per-building columns as level ceilings, which produced nonsense: `gold_store` level 2 required
+Keep 3 even though the "Max bldg level" column says Keep 1 allows level 2, and a Gold Store
+would have been uncapped in level but capped at one instance by the same number.
+
+The columns are counts. Three pieces of evidence settle it:
+
+- `Walls (max)` runs 0 / 25 / 50 / 75 / 100 / 125. A wall _level_ of 125 is meaningless; the
+  numbers are the classic wall allowance (none at Keep 1, then 25 per Keep step).
+- The column values for every building are the number of instances a player owns at that Keep
+  in the reference game, not its max level.
+- The prose says "Its level limits **how many of each building you may own** and the maximum
+  level of each building" — two separate rules, and the table has exactly two kinds of column
+  to carry them.
+
+So `requiredKeepFor(level)` reads **only** the "Max bldg level" column for every building, and
+the per-building columns are transcribed separately into `KEEP_COUNT_LIMITS`, emitted as
+`data/limits.json`, and enforced by the command layer. This also removes a circular dependency
+that the old reading created: the gating function no longer needs to know which building it is
+being asked about.
+
+Consequence: `gold_store` levels 2 and 3 require Keep 1 and 2 (not 3 and 6), and the shipped
+`data/buildings.json` was regenerated. The playthrough was re-measured against the corrected
+tables and the chronological catch-up: Keep 3 is reached at 13.15 h, not the 10.61 h the
+superseded run recorded.
+
+## D31 · 2026-10-19 · Cancelling a level-0 construction removes the building
+
+A construction is a building at `level: 0` with `upgrade: { toLevel: 1 }`. Cancelling it could
+either leave the level-0 record in place (an orphan that occupies tiles, counts against the
+quantity ceiling and renders nothing) or delete it. Deleting is the only coherent choice: the
+building never existed at any playable level, §7.5 charges a 0 refund for started work, and
+`MoveBuilding`-style layout editing is not what `CancelUpgrade` means.
+
+The command removes the building, frees the builder and emits `BuildingRemoved` after
+`UpgradeCancelled`, so a client can cancel its construction animation and drop the sprite. A
+normal upgrade (level ≥ 1) keeps the building at its current level, as before.

@@ -341,3 +341,62 @@ pnpm build          6/6 projects Done; client bundle 1,217.90 kB / 335.73 kB gzi
 Coverage thresholds were **not** lowered (90/85/90/90 unchanged). The one genuinely
 unreachable branch left uncovered is the `!moved` re-check after cloning in
 `MoveBuilding`, kept as a clone-fidelity guard rather than papered over.
+
+---
+
+# Gate B — Phase 2 (Economy & Construction) · COMPLETE, NOT COMMITTED
+
+Full report: **`PHASE2_REPORT.md`**. Decisions D25–D29 in `DECISIONS.md`.
+
+## Architecture (≤10 lines)
+
+```
+sim-core is the only place rules live. It never imports game-data.
+game-data holds balance tables; it validates them at import and re-exports a GameConfig.
+PlayerState is the authoritative server state; configVersion stamps which tables produced it.
+catchUp(state, now) is the single lazy-time evaluator: every mutating command runs it first,
+  on a clone, and prepends its events. Rejections are decided before any clone exists.
+Production is exact integer arithmetic with the fractional carry as a numerator over
+  msPerHour, so command frequency cannot change the amount produced.
+Overflow is lost, never banked; the watermark advances anyway, so time spent full is discarded.
+Storage caps clamp collection; what did not fit is reported in the event, not silently dropped.
+Builders are a counted resource: busy.length <= count, and each busy entry matches a building.
+No Date.now(), no Math.random(), no DOM, no fs, no network. Stable iteration by ascending id.
+```
+
+## Status
+
+| Gate | Item                                                                                        | Result   |
+| ---- | ------------------------------------------------------------------------------------------- | -------- |
+| B1   | Data-driven economy, typed schema, Keep gating, stable error codes                          | **Pass** |
+| B2   | Pure `catchUp`, monotonic time, exact arithmetic, one shared catch-up                       | **Pass** |
+| B3   | Collectors, storage caps, `CollectResource`, overflow lost + evented                        | **Pass** |
+| B4   | `StartUpgrade` / `CancelUpgrade` / `SpeedUp` / `BuyBuilder` + integrated place/move/collect | **Pass** |
+| B5   | `gen-balance.ts` deterministic, byte-identical, satisfies the validator                     | **Pass** |
+| B6   | Seven-day playthrough reaches Keep 3 in **13.15 h** of 168 (re-measured; was 10.61 h)       | **Pass** |
+| B7   | Full Phase 2 test list                                                                      | **Pass** |
+
+## Verification (all re-run after a mid-session sandbox re-clone)
+
+| Command              | Result                                                           |
+| -------------------- | ---------------------------------------------------------------- |
+| `pnpm verify`        | exit 0                                                           |
+| `pnpm test`          | 444 tests / 20 files                                             |
+| `pnpm test:coverage` | 98.09 / 92.49 / 100 / 98.09 vs 90 / 85 / 90 / 90                 |
+| `pnpm bench`         | rng 35.5 ms · commands 82.3 ms · clones 37.3 ms · catchUp 1.3 ms |
+| `pnpm build`         | 6/6 Done, client bundle 1,217.90 kB / 335.73 kB gzip (unchanged) |
+| `gen:balance` twice  | byte-identical, no diff                                          |
+
+## Known gaps (see `PHASE2_REPORT.md` for the full list)
+
+1. `src/build/index.ts` was reconstructed after the sandbox re-clone; re-verified but its
+   history starts here.
+2. No builder queue yet, so the 50% unstarted-item refund has no reachable command path in
+   Phase 2 (unit-tested directly; Phase 4 item).
+3. `MoveBuilding` / `RemoveObstacle` are still free and instant; `removalSeconds` unenforced.
+4. Buildings under construction sit at `level: 0` — Phase 3 and Phase 6 must handle it.
+5. Coverage 98.09/92.49 vs Gate A's 99.33/95.88; the residue is defense-in-depth branches.
+
+## Next permitted phase
+
+Phase 3 (client / rendering) — not started.

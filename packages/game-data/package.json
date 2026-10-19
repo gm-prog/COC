@@ -17,7 +17,9 @@
     },
     "./data/buildings.json": "./data/buildings.json",
     "./data/obstacles.json": "./data/obstacles.json",
-    "./data/starter.json": "./data/starter.json"
+    "./data/starter.json": "./data/starter.json",
+    "./data/economy.json": "./data/economy.json",
+    "./data/limits.json": "./data/limits.json"
   },
   "files": [
     "src",
@@ -27,11 +29,14 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build": "tsc --noEmit -p tsconfig.json",
-    "watch": "tsc --noEmit -p tsconfig.json --watch"
+    "watch": "tsc --noEmit -p tsconfig.json --watch",
+    "gen:balance": "tsx scripts/gen-balance.ts"
   },
   "dependencies": {
     "@coc/sim-core": "workspace:*"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  },
   "sideEffects": false
 }

@@ -49,21 +49,30 @@ describe('PlaceBuilding', () => {
     );
 
     expect(result.state.buildings).toHaveLength(3);
+    // Construction starts at level 0 and occupies a builder until it finishes.
     expect(result.state.buildings[2]).toEqual({
       id: 5,
       type: 'wall',
-      level: 1,
+      level: 0,
       x: 20,
       y: 25,
+      upgrade: { toLevel: 1, finishAt: NOW + 5000 },
     });
+    expect(result.state.builders.busy).toEqual([
+      { buildingId: 5, toLevel: 1, finishAt: NOW + 5000 },
+    ]);
+    expect(result.state.resources.gold).toBe(990); // the wall costs 10 gold
     expect(result.events).toEqual([
+      { type: 'ResourcesChanged', changes: { gold: -10 }, reason: 'construction_started' },
+      { type: 'BuildingPlaced', buildingId: 5, buildingType: 'wall', level: 0, x: 20, y: 25 },
       {
-        type: 'BuildingPlaced',
+        type: 'UpgradeStarted',
         buildingId: 5,
         buildingType: 'wall',
-        level: 1,
-        x: 20,
-        y: 25,
+        fromLevel: 0,
+        toLevel: 1,
+        finishAt: NOW + 5000,
+        cost: { gold: 10 },
       },
     ]);
     expect(result.state.lastSyncAt).toBe(NOW);
@@ -263,31 +272,66 @@ describe('MoveBuilding', () => {
 
 describe('RemoveObstacle', () => {
   it('removes the obstacle, grants the reward and reports both events', () => {
+    // Below the Keep's storage cap: the reward has room to land.
+    const state = newState();
+    state.resources.gold = 100;
     const result = expectOk(
-      applyCommand(
-        newState(),
-        command({ type: 'RemoveObstacle', payload: { obstacleId: 3 } }),
-        ctx,
-      ),
+      applyCommand(state, command({ type: 'RemoveObstacle', payload: { obstacleId: 3 } }), ctx),
     );
 
     expect(result.state.obstacles).toEqual([{ id: 4, type: 'rock', x: 30, y: 12 }]);
-    expect(result.state.resources.gold).toBe(1020);
+    expect(result.state.resources.gold).toBe(120);
     expect(result.events).toEqual([
-      { type: 'ObstacleRemoved', obstacleId: 3, obstacleType: 'tree', reward: { gold: 20 } },
+      {
+        type: 'ObstacleRemoved',
+        obstacleId: 3,
+        obstacleType: 'tree',
+        reward: { gold: 20 },
+        credited: { gold: 20 },
+        overflow: {},
+      },
       { type: 'ResourcesChanged', changes: { gold: 20 }, reason: 'obstacle_cleared' },
     ]);
   });
 
   it('grants multi-resource rewards', () => {
+    const state = newState();
+    state.resources.gold = 100;
     const result = expectOk(
-      applyCommand(
-        newState(),
-        command({ type: 'RemoveObstacle', payload: { obstacleId: 4 } }),
-        ctx,
-      ),
+      applyCommand(state, command({ type: 'RemoveObstacle', payload: { obstacleId: 4 } }), ctx),
     );
-    expect(result.state.resources).toMatchObject({ gold: 1030, gems: 51 });
+    expect(result.state.resources).toMatchObject({ gold: 130, gems: 51 });
+  });
+
+  it('discards a reward that does not fit in storage (spec 7.2: overflow is lost)', () => {
+    // The starter sits at the Keep's 1,000 gold cap, so a 20-gold tree reward
+    // has nowhere to go. It must be lost, not banked for later.
+    const state = newState();
+    expect(state.resources.gold).toBe(1000);
+    const result = expectOk(
+      applyCommand(state, command({ type: 'RemoveObstacle', payload: { obstacleId: 3 } }), ctx),
+    );
+    expect(result.state.resources.gold).toBe(1000);
+    expect(result.events).toEqual([
+      {
+        type: 'ObstacleRemoved',
+        obstacleId: 3,
+        obstacleType: 'tree',
+        reward: { gold: 20 },
+        credited: {},
+        overflow: { gold: 20 },
+      },
+    ]);
+  });
+
+  it('credits only the room that is left and discards the rest', () => {
+    const state = newState();
+    state.resources.gold = 995;
+    const result = expectOk(
+      applyCommand(state, command({ type: 'RemoveObstacle', payload: { obstacleId: 3 } }), ctx),
+    );
+    expect(result.state.resources.gold).toBe(1000);
+    expect(result.events[0]).toMatchObject({ credited: { gold: 5 }, overflow: { gold: 15 } });
   });
 
   it('frees the tiles the obstacle occupied', () => {
@@ -365,11 +409,17 @@ describe('determinism', () => {
 
   function runOnce(): string {
     let state = createNewPlayerState(TEST_CONFIG, NOW);
-    for (const step of script) {
-      const result = applyCommand(state, { id: 'c', ...step }, ctx);
+    // Construction occupies a builder, so the clock has to move between steps
+    // for the later placements to find a free one.
+    script.forEach((step, index) => {
+      const result = applyCommand(
+        state,
+        { id: 'c', ...step },
+        { config: TEST_CONFIG, now: NOW + index * 10_000 },
+      );
       if (!result.ok) throw new Error(`unexpected failure: ${result.error.code}`);
       state = result.state;
-    }
+    });
     return hashState(state);
   }
 
@@ -390,6 +440,97 @@ describe('determinism', () => {
       ),
     ).state;
     expect(hashState(state)).not.toBe(runOnce());
+  });
+
+  it('lets a builder start a new job once the previous one has finished', () => {
+    const state = createNewPlayerState(TEST_CONFIG, NOW);
+    const first = expectOk(
+      applyCommand(
+        state,
+        command({ type: 'PlaceBuilding', payload: { buildingType: 'wall', x: 20, y: 25 } }),
+        ctx,
+      ),
+    ).state;
+    expect(first.builders.busy).toHaveLength(1);
+
+    const second = expectOk(
+      applyCommand(
+        first,
+        command({ type: 'PlaceBuilding', payload: { buildingType: 'wall', x: 21, y: 25 } }),
+        ctx,
+      ),
+    ).state;
+    expect(second.builders.busy).toHaveLength(2);
+
+    // Both builders are now busy, so a third placement is refused...
+    const refused = applyCommand(
+      second,
+      command({ type: 'PlaceBuilding', payload: { buildingType: 'wall', x: 22, y: 25 } }),
+      ctx,
+    );
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.code).toBe('no_builder');
+
+    // ...until both walls' 5 s are up, at which point both are finished and the
+    // third placement takes the freed builder.
+    const third = expectOk(
+      applyCommand(
+        second,
+        command({ type: 'PlaceBuilding', payload: { buildingType: 'wall', x: 22, y: 25 } }),
+        { config: TEST_CONFIG, now: NOW + 10_000 },
+      ),
+    ).state;
+    expect(third.builders.busy).toHaveLength(1);
+    expect(third.buildings.find((b) => b.x === 20 && b.y === 25)?.level).toBe(1);
+    expect(third.buildings.find((b) => b.x === 21 && b.y === 25)?.level).toBe(1);
+    expect(third.buildings.find((b) => b.x === 22 && b.y === 25)?.level).toBe(0);
+  });
+
+  it('charges the level-1 cost and records the construction', () => {
+    const state = createNewPlayerState(TEST_CONFIG, NOW);
+    const result = expectOk(
+      applyCommand(
+        state,
+        command({ type: 'PlaceBuilding', payload: { buildingType: 'gold_mine', x: 6, y: 6 } }),
+        ctx,
+      ),
+    );
+    expect(result.state.resources.gold).toBe(state.resources.gold - 100);
+    expect(result.state.buildings.at(-1)).toEqual({
+      id: 5,
+      type: 'gold_mine',
+      level: 0,
+      x: 6,
+      y: 6,
+      upgrade: { toLevel: 1, finishAt: NOW + 10_000 },
+    });
+    expect(result.events).toEqual([
+      { type: 'ResourcesChanged', changes: { gold: -100 }, reason: 'construction_started' },
+      { type: 'BuildingPlaced', buildingId: 5, buildingType: 'gold_mine', level: 0, x: 6, y: 6 },
+      {
+        type: 'UpgradeStarted',
+        buildingId: 5,
+        buildingType: 'gold_mine',
+        fromLevel: 0,
+        toLevel: 1,
+        finishAt: NOW + 10_000,
+        cost: { gold: 100 },
+      },
+    ]);
+  });
+
+  it('refuses a construction the player cannot afford', () => {
+    const poor = createNewPlayerState(TEST_CONFIG, NOW);
+    poor.resources.gold = 99;
+    const error = expectError(
+      applyCommand(
+        poor,
+        command({ type: 'PlaceBuilding', payload: { buildingType: 'gold_mine', x: 6, y: 6 } }),
+        ctx,
+      ),
+    );
+    expect(error.code).toBe('insufficient_resources');
+    expect(error.details).toEqual({ missing: { gold: 1 } });
   });
 
   it('keeps the grid geometry used by placement consistent', () => {

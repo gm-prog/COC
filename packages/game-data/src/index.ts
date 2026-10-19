@@ -9,6 +9,8 @@
 import { validateGameConfig, type GameConfig } from '@coc/sim-core';
 
 import buildings from '../data/buildings.json';
+import economy from '../data/economy.json';
+import limits from '../data/limits.json';
 import obstacles from '../data/obstacles.json';
 import starter from '../data/starter.json';
 
@@ -23,6 +25,8 @@ export const rawConfig = {
   buildings,
   obstacles,
   starter,
+  economy,
+  limits,
 } as const;
 
 /**

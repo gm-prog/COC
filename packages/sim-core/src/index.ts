@@ -78,6 +78,11 @@ export {
   type BuildingDef,
   type BuildingLevel,
   type BuildingSize,
+  type EconomyConfig,
+  type SpeedUpAnchor,
+  type BuilderShop,
+  type CancelRefund,
+  type BuildingLimits,
   type ObstacleDef,
   type StarterConfig,
   type StarterBuilding,
@@ -91,13 +96,47 @@ export {
   validateGameConfig,
   loadGameConfig,
   validateBuildingDefs,
+  checkEconomy,
+  checkLimits,
+  checkSemantics,
+  checkStarterLayout,
   type ValidatedGameConfig,
 } from './validate/index.js';
+
+// economy (lazy time evaluation, production, storage)
+export {
+  catchUp,
+  storageCapacity,
+  remainingCapacity,
+  addResources,
+  canAfford,
+  buildingDef,
+  levelDef,
+  type CatchUpEvent,
+  type CatchUpResult,
+  type CatchUpError,
+} from './economy/index.js';
+
+// build (upgrade, cancel, speed-up, builder shop)
+export {
+  checkUpgrade,
+  nextLevel,
+  currentLevel,
+  cancelRefundFraction,
+  refundFor,
+  speedUpCost,
+  nextBuilderCost,
+  canBuyBuilder,
+  upgradeDurationMs,
+  type UpgradeCheck,
+  type UpgradeRejection,
+} from './build/index.js';
 
 // state
 export {
   STATE_VERSION,
   createNewPlayerState,
+  countBuildings,
   findKeep,
   isKeepLevelConsistent,
   highestEntityId,
@@ -123,6 +162,11 @@ export {
   type PlaceBuildingPayload,
   type MoveBuildingPayload,
   type RemoveObstaclePayload,
+  type StartUpgradePayload,
+  type CancelUpgradePayload,
+  type SpeedUpPayload,
+  type BuyBuilderPayload,
+  type CollectResourcePayload,
 } from './commands/index.js';
 
 // serialize

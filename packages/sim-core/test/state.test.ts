@@ -110,6 +110,19 @@ describe('serialization round-trip', () => {
   });
 });
 
+it('defaults keepLevel to 1 when the starter layout has no Keep', () => {
+  // The validator refuses such a config, but createNewPlayerState must still
+  // produce a usable state rather than reading `undefined.level`.
+  const broken = {
+    ...TEST_CONFIG,
+    starter: { ...TEST_CONFIG.starter, buildings: [] },
+  };
+  const state = createNewPlayerState(broken, NOW);
+  expect(state.keepLevel).toBe(1);
+  expect(state.buildings).toEqual([]);
+  expect(state.builders).toEqual({ count: 2, busy: [] });
+});
+
 describe('isKeepLevelConsistent without a Keep', () => {
   it('treats a village with no Keep as consistent', () => {
     const state = createNewPlayerState(TEST_CONFIG, 0);
