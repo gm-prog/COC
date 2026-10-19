@@ -1,4 +1,8 @@
 import { t, type TranslationKey } from './i18n';
+import {
+  formatRemainingDuration,
+  type VillageHudSnapshot,
+} from './villageHud';
 
 /**
  * Thin wrapper over the DOM debug HUD (index.html).
@@ -57,6 +61,94 @@ export class Hud {
 
   setVersions(versions: { protocol: string; simCore: string; config: string }): void {
     this.text('hud-versions', t('hud.versions', versions));
+  }
+
+  setVillageSnapshot(snapshot: VillageHudSnapshot): void {
+    for (const resource of snapshot.resources) {
+      const prefix = 'resource-' + resource.id;
+      const label = t(('resource.' + resource.id) as TranslationKey);
+      this.text(
+        prefix + '-value',
+        resource.capacity === undefined
+          ? t('resource.amount', { amount: resource.amount })
+          : t('resource.amountCapacity', {
+              amount: resource.amount,
+              capacity: resource.capacity,
+            }),
+      );
+
+      const track = this.el(prefix + '-track');
+      const fill = this.el(prefix + '-fill');
+      if (!track || !fill) continue;
+
+      const capacity = resource.capacity;
+      const hasCapacity = capacity !== undefined && capacity > 0;
+      track.hidden = !hasCapacity;
+      fill.style.width =
+        hasCapacity && capacity !== undefined
+          ? Math.min(100, Math.max(0, (resource.amount / capacity) * 100)) + '%'
+          : '0%';
+
+      if (hasCapacity && capacity !== undefined) {
+        track.setAttribute('aria-label', t('resource.storageLabel', { resource: label }));
+        track.setAttribute('aria-valuemin', '0');
+        track.setAttribute('aria-valuemax', String(capacity));
+        track.setAttribute('aria-valuenow', String(Math.min(resource.amount, capacity)));
+      }
+    }
+
+    this.text('builders-title', t('builders.title'));
+    this.text(
+      'builders-count',
+      t('builders.available', {
+        available: snapshot.builders.available,
+        total: snapshot.builders.total,
+      }),
+    );
+
+    const indicators = this.el('builder-indicators');
+    if (indicators) {
+      indicators.replaceChildren();
+      for (let index = 0; index < snapshot.builders.total; index += 1) {
+        const busy = index >= snapshot.builders.available;
+        const icon = document.createElement('span');
+        icon.className = busy ? 'builder-icon builder-icon--busy' : 'builder-icon';
+        icon.textContent = '⚒';
+        icon.setAttribute('role', 'img');
+        icon.setAttribute(
+          'aria-label',
+          busy
+            ? t('builders.busyIcon', { number: index + 1 })
+            : t('builders.availableIcon', { number: index + 1 }),
+        );
+        indicators.append(icon);
+      }
+    }
+
+    const countdowns = this.el('builder-countdowns');
+    if (countdowns) {
+      countdowns.replaceChildren();
+      countdowns.hidden = snapshot.builders.busy.length === 0;
+      for (const builder of snapshot.builders.busy) {
+        const item = document.createElement('li');
+        const key = 'building.' + builder.buildingType;
+        const knownLabels: Record<string, TranslationKey> = {
+          keep: 'building.keep',
+          gold_mine: 'building.gold_mine',
+          essence_well: 'building.essence_well',
+          gold_store: 'building.gold_store',
+          essence_store: 'building.essence_store',
+          wall: 'building.wall',
+        };
+        const labelKey = knownLabels[builder.buildingType];
+        const building = labelKey ? t(labelKey) : t('builders.unknownBuilding');
+        item.textContent = t('builders.busyItem', {
+          building,
+          remaining: formatRemainingDuration(builder.remainingMs),
+        });
+        countdowns.append(item);
+      }
+    }
   }
 
   setSelection(

@@ -18,7 +18,7 @@
         in the DOM (rather than in Phaser) so text stays crisp, scalable and
         screen-reader accessible.
       -->
-      <div id="hud" class="hud" role="status" aria-live="polite">
+      <div id="hud" class="hud" role="group" aria-label="Emberhold game HUD">
         <div class="hud__row hud__row--top">
           <span class="hud__badge" id="hud-title">EMBERHOLD</span>
           <span class="hud__stat"
@@ -38,6 +38,62 @@
             ><b id="hud-zone" data-testid="zone">&mdash;</b></span
           >
         </div>
+        <aside class="village-hud" aria-label="Village resources and builders">
+          <div class="village-hud__resources" aria-label="Resources">
+            <div class="resource-card" data-testid="resource-gold">
+              <div class="resource-card__row">
+                <span id="resource-gold-label">Gold</span>
+                <strong id="resource-gold-value">0 / 0</strong>
+              </div>
+              <div
+                class="resource-card__track"
+                id="resource-gold-track"
+                role="progressbar"
+                aria-label="Gold storage capacity"
+                aria-valuemin="0"
+                aria-valuemax="1000"
+                aria-valuenow="1000"
+                data-testid="resource-gold-bar"
+              ><span class="resource-card__fill" id="resource-gold-fill"></span></div>
+            </div>
+            <div class="resource-card" data-testid="resource-essence">
+              <div class="resource-card__row">
+                <span id="resource-essence-label">Essence</span>
+                <strong id="resource-essence-value">0 / 0</strong>
+              </div>
+              <div
+                class="resource-card__track"
+                id="resource-essence-track"
+                role="progressbar"
+                aria-label="Essence storage capacity"
+                aria-valuemin="0"
+                aria-valuemax="1000"
+                aria-valuenow="1000"
+                data-testid="resource-essence-bar"
+              ><span class="resource-card__fill" id="resource-essence-fill"></span></div>
+            </div>
+            <div class="resource-card resource-card--plain" data-testid="resource-shards">
+              <div class="resource-card__row">
+                <span id="resource-shards-label">Shards</span>
+                <strong id="resource-shards-value">0</strong>
+              </div>
+            </div>
+            <div class="resource-card resource-card--plain" data-testid="resource-gems">
+              <div class="resource-card__row">
+                <span id="resource-gems-label">Gems</span>
+                <strong id="resource-gems-value">0</strong>
+              </div>
+            </div>
+          </div>
+          <section class="builder-card" aria-label="Builders">
+            <div class="builder-card__icons" id="builder-indicators" aria-label="Builder status"></div>
+            <div class="builder-card__details">
+              <span class="builder-card__title" id="builders-title">Builders</span>
+              <strong id="builders-count">0 / 0 available</strong>
+              <ul class="builder-card__countdowns" id="builder-countdowns" hidden></ul>
+            </div>
+          </section>
+        </aside>
         <aside
           class="selection-panel"
           id="selection-panel"
