@@ -9,5 +9,17 @@
   "hud.zoneBuildable": "Buildable",
   "hud.zoneMargin": "Margin",
   "hud.versions": "protocol {protocol} · sim-core {simCore} · config {config}",
-  "hud.tileNone": "—"
+  "hud.tileNone": "—",
+  "selection.kind.building": "Building",
+  "selection.kind.obstacle": "Obstacle",
+  "selection.meta.building": "Level {level} · Tile {x}, {y}",
+  "selection.meta.obstacle": "Tile {x}, {y}",
+  "building.keep": "Keep",
+  "building.gold_mine": "Gold Mine",
+  "building.essence_well": "Essence Well",
+  "building.gold_store": "Gold Store",
+  "building.essence_store": "Essence Store",
+  "building.wall": "Wall",
+  "obstacle.tree": "Tree",
+  "obstacle.rock": "Rock"
 }
