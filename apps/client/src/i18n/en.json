@@ -34,5 +34,9 @@
   "builders.availableIcon": "Builder {number} available",
   "builders.busyIcon": "Builder {number} working",
   "builders.busyItem": "{building} · {remaining}",
-  "builders.unknownBuilding": "Building"
+  "builders.unknownBuilding": "Building",
+  "app.hudAriaLabel": "Emberhold game HUD",
+  "village.status": "Village status",
+  "village.resources": "Village resources",
+  "builders.status": "Builder status"
 }
