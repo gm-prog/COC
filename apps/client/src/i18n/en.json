@@ -21,5 +21,22 @@
   "building.essence_store": "Essence Store",
   "building.wall": "Wall",
   "obstacle.tree": "Tree",
-  "obstacle.rock": "Rock"
+  "obstacle.rock": "Rock",
+  "resource.gold": "Gold",
+  "resource.essence": "Essence",
+  "resource.shards": "Shards",
+  "resource.gems": "Gems",
+  "resource.amountCapacity": "{amount} / {capacity}",
+  "resource.amount": "{amount}",
+  "resource.storageLabel": "{resource} storage capacity",
+  "builders.title": "Builders",
+  "builders.available": "{available} / {total} available",
+  "builders.availableIcon": "Builder {number} available",
+  "builders.busyIcon": "Builder {number} working",
+  "builders.busyItem": "{building} · {remaining}",
+  "builders.unknownBuilding": "Building",
+  "app.hudAriaLabel": "Emberhold game HUD",
+  "village.status": "Village status",
+  "village.resources": "Village resources",
+  "builders.status": "Builder status"
 }

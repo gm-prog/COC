@@ -20,6 +20,7 @@ import {
   type ViewBounds,
 } from '../cameraTransform';
 import { Hud } from '../hud';
+import { buildVillageHudSnapshot } from '../villageHud';
 import {
   findVillageEntityAtTile,
   listVillageEntities,
@@ -119,6 +120,7 @@ export class BootScene extends Phaser.Scene {
 
   private fpsElapsed = 0;
   private fpsFrames = 0;
+  private villageHudElapsed = 0;
 
   constructor() {
     super({ key: BootScene.KEY });
@@ -143,6 +145,9 @@ export class BootScene extends Phaser.Scene {
     this.world.add([this.staticLayer, this.entityLayer, this.selectLayer, this.hoverLayer]);
 
     this.playerState = createNewPlayerState(GAME_CONFIG, 0);
+    this.hud.setVillageSnapshot(
+      buildVillageHudSnapshot(this.playerState, GAME_CONFIG, Date.now()),
+    );
     this.drawStaticGrid();
     this.drawVillageEntities();
 
@@ -537,10 +542,21 @@ export class BootScene extends Phaser.Scene {
   override update(_time: number, delta: number): void {
     this.fpsElapsed += delta;
     this.fpsFrames += 1;
+    this.villageHudElapsed += delta;
+
     if (this.fpsElapsed >= 250) {
       this.hud.setFps((this.fpsFrames * 1000) / this.fpsElapsed);
       this.fpsElapsed = 0;
       this.fpsFrames = 0;
+    }
+
+    // Countdown text is presentation-only; simulation rules still receive an
+    // explicit timestamp and never read the wall clock themselves.
+    if (this.villageHudElapsed >= 1000) {
+      this.hud.setVillageSnapshot(
+        buildVillageHudSnapshot(this.playerState, GAME_CONFIG, Date.now()),
+      );
+      this.villageHudElapsed = 0;
     }
   }
 }

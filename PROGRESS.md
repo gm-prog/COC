@@ -30,12 +30,17 @@ Design source of truth: [`docs/GAME_SPEC.md`](docs/GAME_SPEC.md).
 
 ## Phase status
 
+Phase 3 is underway. The first shipped slice renders the starter buildings and obstacles with
+placeholder isometric blocks and supports entity selection with a localized information panel.
+The current next slice adds read-only resource capacity and builder status to the HUD; placement,
+collection, upgrades, and local persistence remain outstanding.
+
 | Phase | Title                                | Status         |
 | ----- | ------------------------------------ | -------------- |
 | 0     | Bootstrap & tooling                  | ✅ Complete    |
 | 1     | Sim-core foundations                 | ✅ Complete    |
 | 2     | Economy & construction               | ✅ Complete    |
-| 3     | Client: Village scene & building UX  | ⚪ Not started |
+| 3     | Client: Village scene & building UX  | 🟡 In progress |
 | 4     | Army, spells, laboratory             | ⚪ Not started |
 | 5     | Battle simulator (headless)          | ⚪ Not started |
 | 6     | Battle client, replays, campaign     | ⚪ Not started |
