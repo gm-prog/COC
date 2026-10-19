@@ -511,14 +511,21 @@ export class BootScene extends Phaser.Scene {
     this.redrawSelection();
     this.hud.setTile(tile.x, tile.y);
     this.hud.setZone(this.isBuildable(tile));
-    if (this.selectedEntity) {
-      const instance = this.selectedEntity.instance;
+    const entity = this.selectedEntity;
+    if (entity?.kind === 'building') {
       this.hud.setSelection({
-        kind: this.selectedEntity.kind,
-        id: this.selectedEntity.definition.id,
-        x: instance.x,
-        y: instance.y,
-        ...(this.selectedEntity.kind === 'building' ? { level: instance.level } : {}),
+        kind: 'building',
+        id: entity.definition.id,
+        x: entity.instance.x,
+        y: entity.instance.y,
+        level: entity.instance.level,
+      });
+    } else if (entity?.kind === 'obstacle') {
+      this.hud.setSelection({
+        kind: 'obstacle',
+        id: entity.definition.id,
+        x: entity.instance.x,
+        y: entity.instance.y,
       });
     } else {
       this.hud.setSelection(null);
