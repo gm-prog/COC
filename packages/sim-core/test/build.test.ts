@@ -474,3 +474,107 @@ describe('speedUpCost — anchors at the validated arithmetic limit', () => {
     expect(speedUpCost(12_345_678, config)).toBe(speedUpCost(12_345_678, config));
   });
 });
+
+describe('speedUpCost — malformed hand-built curves (D34)', () => {
+  /**
+   * Builds a config that never went through `validateGameConfig`, which is the
+   * only way to reach `speedUpCost` with anchors the schema would reject.
+   */
+  function handBuilt(anchors: { seconds: number; gems: number }[], minimumGems = 1) {
+    const clone = JSON.parse(JSON.stringify(config)) as typeof config;
+    clone.economy.speedUp = { anchors, minimumGems };
+    return clone;
+  }
+
+  it('does not throw when an anchor converts to an infinite span', () => {
+    // Number.MAX_VALUE * 1000 === Infinity, so the span of this segment is
+    // Infinity and `BigInt(span)` used to raise a native RangeError.
+    expect(Number.MAX_VALUE * 1000).toBe(Number.POSITIVE_INFINITY);
+    const broken = handBuilt([
+      { seconds: 1, gems: 1 },
+      { seconds: Number.MAX_VALUE, gems: 2 },
+    ]);
+
+    for (const ms of [0, 1_000, 1_001, 5_000, 3_600_000, 1e12]) {
+      expect(() => speedUpCost(ms, broken), `${ms} ms threw`).not.toThrow();
+    }
+  });
+
+  it('falls back to the last usable anchor', () => {
+    // The unusable anchor is dropped, so the curve is flat at the last anchor
+    // that has an exact millisecond position.
+    const broken = handBuilt([
+      { seconds: 1, gems: 1 },
+      { seconds: Number.MAX_VALUE, gems: 2 },
+    ]);
+
+    expect(speedUpCost(5_000, broken)).toBe(1);
+    expect(speedUpCost(3_600_000, broken)).toBe(1);
+    expect(speedUpCost(1e12, broken)).toBe(1);
+    // Below and at the surviving anchor the behaviour is unchanged.
+    expect(speedUpCost(0, broken)).toBe(1);
+    expect(speedUpCost(1_000, broken)).toBe(1);
+  });
+
+  it('returns a safe integer for the malformed curve', () => {
+    const broken = handBuilt([
+      { seconds: 1, gems: 1 },
+      { seconds: Number.MAX_VALUE, gems: 2 },
+    ]);
+
+    for (const ms of [0, 1_000, 5_000, 1e9, 1e12]) {
+      const gems = speedUpCost(ms, broken);
+      expect(Number.isSafeInteger(gems), `${ms} ms produced ${gems}`).toBe(true);
+      expect(gems).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('returns minimumGems when no anchor is usable', () => {
+    const broken = handBuilt(
+      [
+        { seconds: Number.MAX_VALUE, gems: 2 },
+        { seconds: Number.POSITIVE_INFINITY, gems: 3 },
+      ],
+      7,
+    );
+
+    for (const ms of [0, 5_000, 1e12]) {
+      expect(speedUpCost(ms, broken)).toBe(7);
+    }
+  });
+
+  it('drops an anchor with an unusable price but keeps the valid ones', () => {
+    const broken = handBuilt([
+      { seconds: 10, gems: 5 },
+      { seconds: 20, gems: Number.NaN },
+      { seconds: 30, gems: 15 },
+    ]);
+
+    // 10 s and 30 s survive, so the curve is unchanged between them.
+    expect(speedUpCost(10_000, broken)).toBe(5);
+    expect(speedUpCost(20_000, broken)).toBe(10);
+    expect(speedUpCost(30_000, broken)).toBe(15);
+    expect(Number.isSafeInteger(speedUpCost(20_000, broken))).toBe(true);
+  });
+
+  it('is deterministic on a malformed curve', () => {
+    const broken = handBuilt([
+      { seconds: 1, gems: 1 },
+      { seconds: Number.MAX_VALUE, gems: 2 },
+    ]);
+    const first = speedUpCost(5_000, broken);
+    for (let i = 0; i < 100; i += 1) expect(speedUpCost(5_000, broken)).toBe(first);
+  });
+
+  it('leaves the validated production curve untouched by the guard', () => {
+    // Same expectations as the unguarded path: every anchor, both midpoints.
+    expect(speedUpCost(60_000, config)).toBe(1);
+    expect(speedUpCost(3_600_000, config)).toBe(20);
+    expect(speedUpCost(86_400_000, config)).toBe(260);
+    expect(speedUpCost(604_800_000, config)).toBe(1000);
+    expect(speedUpCost(1_830_000, config)).toBe(11);
+    expect(speedUpCost(1_829_999, config)).toBe(10);
+    expect(speedUpCost(2_000, config)).toBe(1);
+    expect(speedUpCost(Number.NaN, config)).toBe(1);
+  });
+});

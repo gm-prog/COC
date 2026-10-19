@@ -417,3 +417,30 @@ a config assembled in code — which is exactly the case D29 says must still be 
 explicit bounds fix both and stop depending on a validator implementation detail.
 
 Anchors, prices, interpolation, half-up rounding and the `minimumGems` rule are unchanged.
+
+## D34 · 2026-10-19 · `speedUpCost` ignores anchors it cannot place exactly
+
+D33 bounded what validation _admits_, but `speedUpCost` is a pure exported function, and a
+caller can hand it a config that never passed `validateGameConfig`. With anchors
+`{ seconds: 1, gems: 1 }` and `{ seconds: Number.MAX_VALUE, gems: 2 }`, any finite duration
+between them makes the segment span `Infinity`, and `BigInt(span)` raised a native
+`RangeError` — a crash escaping a pricing function.
+
+The function now sanitises its own input before any millisecond arithmetic:
+
+- the floor becomes `minimumGems` when that is a positive safe integer, otherwise `1`;
+- an anchor is **dropped** when its `seconds` is not a positive safe integer, when
+  `seconds * 1000` is not a safe integer, or when its `gems` is not a non-negative safe
+  integer;
+- if no anchor survives, the result is the floor.
+
+Drop rather than clamp: clamping a malformed anchor would invent a curve position the config
+never specified, whereas dropping keeps every _valid_ anchor exactly where it was. For the
+reported case the surviving anchor is `{ 1 s, 1 gem }`, so the curve is flat at 1 gem — a
+safe integer, deterministic, and the same value the function already returns above its last
+anchor.
+
+This is a no-op for validated configs: every anchor of a valid table survives sanitising, so
+the sort order, interpolation, half-up rounding, `minimumGems` rule, clamping and determinism
+are byte-for-byte what D32 and D33 established. The schema bounds stay in place — this guard
+is a second line of defence for direct callers, not a relaxation of the first.

@@ -212,33 +212,54 @@ export function refundFor(
  */
 export function speedUpCost(remainingMs: number, config: GameConfig): number {
   const { anchors, minimumGems } = config.economy.speedUp;
-  if (!Number.isFinite(remainingMs) || anchors.length === 0) return minimumGems;
+  // A validated config carries a positive safe-integer floor; a hand-built one
+  // that breaks that promise still gets a usable, in-range minimum.
+  const floor = Number.isSafeInteger(minimumGems) && minimumGems > 0 ? minimumGems : 1;
+  if (!Number.isFinite(remainingMs) || anchors.length === 0) return floor;
 
-  // Defensive copy: the validator enforces ascending anchors, but this function
-  // is pure and must not depend on that for its own correctness.
-  const table = [...anchors].sort((a, b) => a.seconds - b.seconds);
+  // Defensive copy *and* defensive filtering. The validator enforces ascending,
+  // in-range anchors, but this function is pure and a direct caller can hand it
+  // a config that never passed validation. An anchor whose `seconds` has no
+  // exact millisecond form — `Number.MAX_VALUE * 1000` is `Infinity`, and
+  // `Number.MAX_SAFE_INTEGER * 1000` is off by 24 — has no trustworthy position
+  // on the curve, so it is dropped instead of being allowed to poison the span
+  // or reach `BigInt` as a non-integer and raise a native `RangeError`.
+  const table: { ms: number; gems: number }[] = [];
+  for (const anchor of anchors) {
+    const anchorMs = anchor.seconds * 1000;
+    if (!Number.isSafeInteger(anchor.seconds) || anchor.seconds <= 0) continue;
+    if (!Number.isSafeInteger(anchorMs)) continue;
+    if (!Number.isSafeInteger(anchor.gems) || anchor.gems < 0) continue;
+    table.push({ ms: anchorMs, gems: anchor.gems });
+  }
+
+  // Nothing usable is left to interpolate between: fall back to the floor, the
+  // same price this function quotes for a missing or non-finite duration.
+  if (table.length === 0) return floor;
+  table.sort((a, b) => a.ms - b.ms);
+
   const ms = Math.max(0, Math.floor(remainingMs));
 
   const first = table[0] as (typeof table)[number];
   const last = table[table.length - 1] as (typeof table)[number];
 
   // Below the first anchor: the cheapest anchor's price, never under the minimum.
-  if (ms <= first.seconds * 1000) return Math.max(minimumGems, first.gems);
+  if (ms <= first.ms) return Math.max(floor, first.gems);
 
   // Above the last anchor: flat, rather than extrapolated.
-  if (ms >= last.seconds * 1000) return Math.max(minimumGems, last.gems);
+  if (ms >= last.ms) return Math.max(floor, last.gems);
 
   for (let index = 1; index < table.length; index += 1) {
     const previous = table[index - 1] as (typeof table)[number];
     const current = table[index] as (typeof table)[number];
-    const previousMs = previous.seconds * 1000;
-    const currentMs = current.seconds * 1000;
+    const previousMs = previous.ms;
+    const currentMs = current.ms;
     if (ms > currentMs) continue;
 
     const span = currentMs - previousMs;
     // Defensive: the validator enforces strictly ascending anchors, so a
     // non-positive span can only come from a hand-built config.
-    if (span <= 0) return Math.max(minimumGems, previous.gems);
+    if (span <= 0) return Math.max(floor, previous.gems);
 
     // Exact rational interpolation, spec Section 6.4 (integer arithmetic only):
     //
@@ -257,11 +278,11 @@ export function speedUpCost(remainingMs: number, config: GameConfig): number {
     const rounded = (2n * numerator + denominator) / (2n * denominator);
 
     const total = BigInt(previous.gems) + rounded;
-    if (total > MAX_SAFE_BIGINT) return Math.max(minimumGems, Number.MAX_SAFE_INTEGER);
-    return Math.max(minimumGems, Number(total));
+    if (total > MAX_SAFE_BIGINT) return Math.max(floor, Number.MAX_SAFE_INTEGER);
+    return Math.max(floor, Number(total));
   }
 
-  return Math.max(minimumGems, last.gems);
+  return Math.max(floor, last.gems);
 }
 
 /**
