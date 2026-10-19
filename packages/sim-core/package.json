@@ -1,0 +1,26 @@
+{
+  "name": "@coc/sim-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deterministic rules core for Emberhold: grid, state, economy, battle. Pure TypeScript — no DOM, no Node APIs, no wall-clock, no Math.random.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src",
+    "dist"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "watch": "tsc --noEmit -p tsconfig.json --watch"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
