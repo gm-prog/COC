@@ -29,6 +29,11 @@ export class Hud {
 
   setTitle(): void {
     this.text('hud-title', t('app.title'));
+    this.root.setAttribute('aria-label', t('app.hudAriaLabel'));
+    this.text('label-fps', t('hud.fps'));
+    this.text('label-zoom', t('hud.zoom'));
+    this.text('label-tile', t('hud.tile'));
+    this.text('label-zone', t('hud.zone'));
   }
 
   setHint(): void {
@@ -64,9 +69,14 @@ export class Hud {
   }
 
   setVillageSnapshot(snapshot: VillageHudSnapshot): void {
+    this.el('village-hud')?.setAttribute('aria-label', t('village.status'));
+    this.el('village-hud-resources')?.setAttribute('aria-label', t('village.resources'));
+    this.el('builder-card')?.setAttribute('aria-label', t('builders.title'));
+
     for (const resource of snapshot.resources) {
       const prefix = 'resource-' + resource.id;
       const label = t(('resource.' + resource.id) as TranslationKey);
+      this.text(prefix + '-label', label);
       this.text(
         prefix + '-value',
         resource.capacity === undefined
@@ -108,6 +118,7 @@ export class Hud {
 
     const indicators = this.el('builder-indicators');
     if (indicators) {
+      indicators.setAttribute('aria-label', t('builders.status'));
       indicators.replaceChildren();
       for (let index = 0; index < snapshot.builders.total; index += 1) {
         const busy = index >= snapshot.builders.available;
@@ -131,7 +142,6 @@ export class Hud {
       countdowns.hidden = snapshot.builders.busy.length === 0;
       for (const builder of snapshot.builders.busy) {
         const item = document.createElement('li');
-        const key = 'building.' + builder.buildingType;
         const knownLabels: Record<string, TranslationKey> = {
           keep: 'building.keep',
           gold_mine: 'building.gold_mine',
