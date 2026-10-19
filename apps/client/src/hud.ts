@@ -4,6 +4,7 @@ import {
   type VillageHudSnapshot,
 } from './villageHud';
 import type { BuildingShopItem } from './villageShop';
+import type { ResourceId } from '@coc/sim-core';
 
 /**
  * Thin wrapper over the DOM debug HUD (index.html).
@@ -16,6 +17,7 @@ export class Hud {
   private readonly root: HTMLElement;
   private onSelectBuilding: ((buildingType: string) => void) | null = null;
   private onCancelPlacement: (() => void) | null = null;
+  private onCollectResource: ((buildingId: number) => void) | null = null;
 
   private readonly handleHudClick = (event: MouseEvent): void => {
     if (!(event.target instanceof Element)) return;
@@ -35,6 +37,11 @@ export class Hud {
       }
     } else if (action === 'cancel-placement') {
       this.onCancelPlacement?.();
+    } else if (action === 'collect-resource') {
+      const buildingId = Number(actionElement.dataset.buildingId);
+      if (Number.isInteger(buildingId) && buildingId > 0) {
+        this.onCollectResource?.(buildingId);
+      }
     }
   };
 
@@ -50,9 +57,11 @@ export class Hud {
   setShopHandlers(handlers: {
     onSelectBuilding: (buildingType: string) => void;
     onCancelPlacement: () => void;
+    onCollectResource: (buildingId: number) => void;
   }): void {
     this.onSelectBuilding = handlers.onSelectBuilding;
     this.onCancelPlacement = handlers.onCancelPlacement;
+    this.onCollectResource = handlers.onCollectResource;
   }
 
   isShopOpen(): boolean {
@@ -322,6 +331,8 @@ export class Hud {
       x: number;
       y: number;
       level?: number;
+      entityId?: number;
+      collection?: { resource: ResourceId; amount: number };
     } | null,
   ): void {
     const panel = this.el('selection-panel');
@@ -348,5 +359,33 @@ export class Hud {
           })
         : t('selection.meta.obstacle', { x: details.x, y: details.y }),
     );
+
+    const buffer = this.el('selection-buffer');
+    const collectButton = this.el('selection-collect') as HTMLButtonElement | null;
+    const collection = details.kind === 'building' ? details.collection : undefined;
+    if (buffer) {
+      buffer.hidden = collection === undefined;
+      buffer.textContent = collection
+        ? t('selection.buffer', {
+            amount: collection.amount,
+            resource: t(('resource.' + collection.resource) as TranslationKey),
+          })
+        : '';
+    }
+    if (collectButton) {
+      collectButton.hidden = collection === undefined;
+      collectButton.disabled = collection === undefined || collection.amount <= 0;
+      if (collection && details.entityId !== undefined) {
+        const resourceName = t(('resource.' + collection.resource) as TranslationKey);
+        collectButton.dataset.buildingId = String(details.entityId);
+        collectButton.textContent = t('selection.collect');
+        collectButton.setAttribute(
+          'aria-label',
+          t('selection.collectNamed', { amount: collection.amount, resource: resourceName }),
+        );
+      } else {
+        delete collectButton.dataset.buildingId;
+      }
+    }
   }
 }

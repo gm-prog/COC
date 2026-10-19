@@ -123,10 +123,10 @@ For a future PC/Steam release, Steam Playtest can provide gated feedback without
 
 Use this list to guide the next steps. Update it as repository state changes.
 
-- [ ] Reconcile `PROGRESS.md`, `PHASE2_REPORT.md`, and `README.md` with the merged Phase 2 state.
-- [ ] Review an integration PR that brings the tested Phase 1 + Phase 2 baseline into `main`; verify CI before merging.
+- [x] Reconcile `PROGRESS.md`, `PHASE2_REPORT.md`, and `README.md` with the merged Phase 2 state.
+- [x] Review an integration PR that brings the tested Phase 1 + Phase 2 baseline into `main`; verify CI before merging.
 - [ ] Configure appropriate required CI checks and prevent force-pushes on `main`, where settings permit.
-- [ ] Break Phase 3 into small PRs, beginning with visible buildings and selection, then placement and construction interactions.
+- [x] Break Phase 3 into small PRs, beginning with visible buildings and selection, then placement and construction interactions.
 - [ ] Add a browser smoke test for the build → collect → upgrade journey.
 - [ ] Finish and playtest the complete offline loop through Phases 4–6 before starting cloud accounts or PvP.
 

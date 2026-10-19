@@ -10,6 +10,7 @@ import {
   SIM_CORE_VERSION,
   type BuildingCategory,
   type PlayerState,
+  type ResourceId,
 } from '@coc/sim-core';
 import {
   centerOnWorld,
@@ -22,6 +23,7 @@ import {
   type ViewBounds,
 } from '../cameraTransform';
 import { Hud } from '../hud';
+import { t, type TranslationKey } from '../i18n';
 import { buildVillageHudSnapshot } from '../villageHud';
 import { previewBuildingPlacement } from '../villagePlacement';
 import { listBuildingShopItems } from '../villageShop';
@@ -145,6 +147,7 @@ export class BootScene extends Phaser.Scene {
     this.hud.setShopHandlers({
       onSelectBuilding: (buildingType) => this.beginPlacement(buildingType),
       onCancelPlacement: () => this.cancelPlacement(),
+      onCollectResource: (buildingId) => this.collectResourceFromBuilding(buildingId),
     });
 
     this.world = this.add.container(0, 0);
@@ -554,28 +557,134 @@ export class BootScene extends Phaser.Scene {
     this.hud.setTile(tile.x, tile.y);
     this.hud.setZone(this.isBuildable(tile));
     const entity = this.selectedEntity;
-    if (entity?.kind === 'building') {
-      this.hud.setSelection({
-        kind: 'building',
-        id: entity.definition.id,
-        x: entity.instance.x,
-        y: entity.instance.y,
-        level: entity.instance.level,
-      });
-    } else if (entity?.kind === 'obstacle') {
-      this.hud.setSelection({
-        kind: 'obstacle',
-        id: entity.definition.id,
-        x: entity.instance.x,
-        y: entity.instance.y,
-      });
-    } else {
-      this.hud.setSelection(null);
+    if (entity?.kind === 'building' && (entity.instance.buffer?.amount ?? 0) > 0) {
+      this.collectResourceFromBuilding(entity.instance.id);
+      return;
     }
+    this.updateSelectionPanel(entity);
   }
 
   private getNow(): number {
     return Math.max(Date.now(), this.playerState.lastSyncAt);
+  }
+
+  private updateSelectionPanel(entity: VillageEntity | null): void {
+    if (!entity) {
+      this.hud.setSelection(null);
+      return;
+    }
+
+    if (entity.kind === 'building') {
+      const level = entity.definition.levels.find(
+        (candidate) => candidate.level === entity.instance.level,
+      );
+      this.hud.setSelection({
+        kind: 'building',
+        id: entity.definition.id,
+        entityId: entity.instance.id,
+        x: entity.instance.x,
+        y: entity.instance.y,
+        level: entity.instance.level,
+        ...(level?.produces
+          ? {
+              collection: {
+                resource: level.produces,
+                amount: entity.instance.buffer?.amount ?? 0,
+              },
+            }
+          : {}),
+      });
+      return;
+    }
+
+    this.hud.setSelection({
+      kind: 'obstacle',
+      id: entity.definition.id,
+      x: entity.instance.x,
+      y: entity.instance.y,
+    });
+  }
+
+  private collectResourceFromBuilding(buildingId: number): void {
+    const entity = listVillageEntities(this.playerState, GAME_CONFIG).find(
+      (candidate) => candidate.kind === 'building' && candidate.instance.id === buildingId,
+    );
+    if (!entity || entity.kind !== 'building') return;
+
+    const now = this.getNow();
+    const result = applyCommand(
+      this.playerState,
+      {
+        id: 'collect-' + now + '-' + buildingId,
+        type: 'CollectResource',
+        payload: { buildingId },
+      },
+      { config: GAME_CONFIG, now },
+    );
+    if (!result.ok) return;
+
+    const collection = result.events.find((event) => event.type === 'ResourceCollected');
+    this.playerState = result.state;
+    this.hud.setVillageSnapshot(
+      buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
+    );
+    this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
+    this.refreshSelectionAfterCatchUp();
+
+    if (collection?.type === 'ResourceCollected') {
+      const updated = listVillageEntities(this.playerState, GAME_CONFIG).find(
+        (candidate) => candidate.kind === 'building' && candidate.instance.id === buildingId,
+      );
+      if (updated?.kind === 'building') {
+        this.showCollectionFeedback(updated, collection.accepted, collection.overflow, collection.resource);
+      }
+    }
+  }
+
+  private showCollectionFeedback(
+    entity: Extract<VillageEntity, { kind: 'building' }>,
+    accepted: number,
+    overflow: number,
+    resource: ResourceId,
+  ): void {
+    const point = tileCenterToScreen(
+      entity.instance.x + entity.definition.size.w / 2,
+      entity.instance.y + entity.definition.size.h / 2,
+    );
+    const resourceName = t(('resource.' + resource) as TranslationKey);
+    let message: string;
+    if (accepted <= 0) {
+      message = t('collection.storageFull');
+    } else if (overflow > 0) {
+      message = t('collection.floatingOverflow', {
+        amount: accepted,
+        resource: resourceName,
+        overflow,
+      });
+    } else {
+      message = t('collection.floating', { amount: accepted, resource: resourceName });
+    }
+
+    const floating = this.add
+      .text(point.x, point.y - 20, message, {
+        fontFamily: 'system-ui, sans-serif',
+        fontSize: '16px',
+        fontStyle: 'bold',
+        color: accepted > 0 ? '#f4d28a' : '#ef6a6a',
+        stroke: '#0d1117',
+        strokeThickness: 4,
+        align: 'center',
+      })
+      .setOrigin(0.5);
+    this.world.add(floating);
+    this.tweens.add({
+      targets: floating,
+      y: floating.y - 30,
+      alpha: 0,
+      duration: 900,
+      ease: 'Cubic.Out',
+      onComplete: () => floating.destroy(),
+    });
   }
 
   private beginPlacement(buildingType: string): void {
@@ -695,24 +804,7 @@ export class BootScene extends Phaser.Scene {
     );
     this.selectedEntity = updated ?? null;
     this.redrawSelection();
-    if (!updated) {
-      this.hud.setSelection(null);
-    } else if (updated.kind === 'building') {
-      this.hud.setSelection({
-        kind: 'building',
-        id: updated.definition.id,
-        x: updated.instance.x,
-        y: updated.instance.y,
-        level: updated.instance.level,
-      });
-    } else {
-      this.hud.setSelection({
-        kind: 'obstacle',
-        id: updated.definition.id,
-        x: updated.instance.x,
-        y: updated.instance.y,
-      });
-    }
+    this.updateSelectionPanel(this.selectedEntity);
   }
 
   // ----------------------------------------------------------------- update
@@ -742,8 +834,10 @@ export class BootScene extends Phaser.Scene {
         if (caught.events.length > 0) {
           this.drawVillageEntities();
           this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
-          this.refreshSelectionAfterCatchUp();
         }
+        // Collector buffers can grow without completion events, so keep the
+        // selected building's buffered amount in sync with the HUD.
+        this.refreshSelectionAfterCatchUp();
         if (this.placementType !== null) this.redrawPlacementGhost(this.hoverTile);
       }
       this.villageHudElapsed = 0;

@@ -30,10 +30,11 @@ Design source of truth: [`docs/GAME_SPEC.md`](docs/GAME_SPEC.md).
 
 ## Phase status
 
-Phase 3 is underway. The first shipped slice renders the starter buildings and obstacles with
-placeholder isometric blocks and supports entity selection with a localized information panel.
-The current next slice adds read-only resource capacity and builder status to the HUD; placement,
-collection, upgrades, and local persistence remain outstanding.
+Phase 3 is underway. Shipped slices render/select starter buildings and obstacles, show
+resource totals/storage caps and builder countdowns, and provide a config-driven build shop with
+green/red placement previews that commit through sim-core construction rules. The current slice
+adds tap-to-collect with storage-overflow feedback. Upgrade/move controls, obstacles removal UX,
+IndexedDB persistence, and a browser end-to-end smoke test remain outstanding.
 
 | Phase | Title                                | Status         |
 | ----- | ------------------------------------ | -------------- |
