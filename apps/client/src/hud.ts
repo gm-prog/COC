@@ -3,6 +3,7 @@ import {
   formatRemainingDuration,
   type VillageHudSnapshot,
 } from './villageHud';
+import type { BuildingShopItem } from './villageShop';
 
 /**
  * Thin wrapper over the DOM debug HUD (index.html).
@@ -13,9 +14,157 @@ import {
  */
 export class Hud {
   private readonly root: HTMLElement;
+  private onSelectBuilding: ((buildingType: string) => void) | null = null;
+  private onCancelPlacement: (() => void) | null = null;
+
+  private readonly handleHudClick = (event: MouseEvent): void => {
+    if (!(event.target instanceof Element)) return;
+    const actionElement = event.target.closest<HTMLElement>('[data-hud-action]');
+    if (!actionElement || !this.root.contains(actionElement)) return;
+
+    const action = actionElement.dataset.hudAction;
+    if (action === 'toggle-shop') {
+      this.setShopOpen(!this.isShopOpen());
+    } else if (action === 'close-shop') {
+      this.setShopOpen(false);
+    } else if (action === 'select-building') {
+      const buildingType = actionElement.dataset.buildingType;
+      if (buildingType) {
+        this.setShopOpen(false);
+        this.onSelectBuilding?.(buildingType);
+      }
+    } else if (action === 'cancel-placement') {
+      this.onCancelPlacement?.();
+    }
+  };
 
   constructor(root: HTMLElement) {
     this.root = root;
+    this.root.addEventListener('click', this.handleHudClick);
+  }
+
+  dispose(): void {
+    this.root.removeEventListener('click', this.handleHudClick);
+  }
+
+  setShopHandlers(handlers: {
+    onSelectBuilding: (buildingType: string) => void;
+    onCancelPlacement: () => void;
+  }): void {
+    this.onSelectBuilding = handlers.onSelectBuilding;
+    this.onCancelPlacement = handlers.onCancelPlacement;
+  }
+
+  isShopOpen(): boolean {
+    const panel = this.el('shop-panel');
+    return panel !== null && !panel.hidden;
+  }
+
+  setShopOpen(open: boolean): void {
+    const panel = this.el('shop-panel');
+    if (panel) panel.hidden = !open;
+    this.el('shop-toggle')?.setAttribute('aria-expanded', String(open));
+  }
+
+  setShopCatalog(items: BuildingShopItem[]): void {
+    const container = this.el('shop-items');
+    if (!container) return;
+    container.replaceChildren();
+
+    for (const item of items) {
+      const card = document.createElement('article');
+      card.className = 'shop-item';
+      card.dataset.testid = 'shop-item-' + item.id;
+
+      const heading = document.createElement('div');
+      heading.className = 'shop-item__heading';
+      const title = document.createElement('strong');
+      title.textContent = t(('building.' + item.id) as TranslationKey);
+      const size = document.createElement('span');
+      size.textContent = t('shop.size', { width: item.size.w, height: item.size.h });
+      heading.append(title, size);
+
+      const costParts = Object.entries(item.cost)
+        .filter((entry): entry is [string, number] => entry[1] !== undefined && entry[1] > 0)
+        .map((entry) => entry[1] + ' ' + t(('resource.' + entry[0]) as TranslationKey));
+      const cost = costParts.length > 0 ? costParts.join(' · ') : t('shop.free');
+      const duration =
+        item.buildSeconds === 0
+          ? t('shop.instant')
+          : t('shop.seconds', { seconds: item.buildSeconds });
+      const details = document.createElement('p');
+      details.className = 'shop-item__details';
+      details.textContent = t('shop.details', { cost, duration });
+
+      const reason = document.createElement('p');
+      reason.className = 'shop-item__reason';
+      reason.hidden = item.reason === null;
+      reason.textContent = this.shopReason(item);
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'shop-item__button';
+      button.dataset.hudAction = 'select-building';
+      button.dataset.buildingType = item.id;
+      button.disabled = item.reason !== null;
+      button.textContent = t('shop.select');
+      button.setAttribute(
+        'aria-label',
+        t('shop.selectNamed', { building: title.textContent ?? item.id }),
+      );
+
+      card.append(heading, details, reason, button);
+      container.append(card);
+    }
+  }
+
+  private shopReason(item: BuildingShopItem): string {
+    switch (item.reason) {
+      case 'keep_level':
+        return t('shop.requiredKeep', { level: item.requiredKeep });
+      case 'limit':
+        return t('shop.limitReached', {
+          count: item.count,
+          limit: item.limit ?? item.count,
+        });
+      case 'no_builder':
+        return t('shop.buildersBusy');
+      case 'resources':
+        return t('shop.insufficient');
+      case 'unavailable':
+        return t('shop.unavailable');
+      default:
+        return '';
+    }
+  }
+
+  setPlacementMode(buildingType: string | null): void {
+    const banner = this.el('placement-banner');
+    if (!banner) return;
+    banner.hidden = buildingType === null;
+    this.text('hud-hint', buildingType === null ? t('hud.hint') : '');
+    if (buildingType !== null) {
+      const buildingKey = 'building.' + buildingType;
+      const building = t(buildingKey as TranslationKey);
+      this.text('placement-title', t('placement.title', { building }));
+      this.setPlacementFeedback('none');
+    }
+  }
+
+  setPlacementFeedback(state: 'none' | 'valid' | 'invalid' | 'outside'): void {
+    const banner = this.el('placement-banner');
+    if (banner) {
+      banner.classList.remove('placement-banner--valid', 'placement-banner--invalid');
+      if (state === 'valid') banner.classList.add('placement-banner--valid');
+      if (state === 'invalid') banner.classList.add('placement-banner--invalid');
+    }
+    const key = {
+      none: 'placement.instructions',
+      valid: 'placement.valid',
+      invalid: 'placement.invalid',
+      outside: 'placement.outside',
+    }[state] as TranslationKey;
+    this.text('placement-feedback', t(key));
   }
 
   private el(id: string): HTMLElement | null {
@@ -34,6 +183,11 @@ export class Hud {
     this.text('label-zoom', t('hud.zoom'));
     this.text('label-tile', t('hud.tile'));
     this.text('label-zone', t('hud.zone'));
+    this.text('shop-toggle', t('shop.title'));
+    this.text('shop-title', t('shop.title'));
+    this.text('shop-description', t('shop.description'));
+    this.text('placement-cancel', t('placement.cancel'));
+    this.el('shop-close')?.setAttribute('aria-label', t('shop.close'));
   }
 
   setHint(): void {

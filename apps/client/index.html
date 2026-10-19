@@ -21,6 +21,14 @@
       <div id="hud" class="hud" role="group" aria-label="Emberhold game HUD">
         <div class="hud__row hud__row--top">
           <span class="hud__badge" id="hud-title">EMBERHOLD</span>
+          <button
+            type="button"
+            class="shop-toggle"
+            id="shop-toggle"
+            data-hud-action="toggle-shop"
+            aria-controls="shop-panel"
+            aria-expanded="false"
+          >Build</button>
           <span class="hud__stat"
             ><span class="hud__label" id="label-fps">FPS</span
             ><b id="hud-fps" data-testid="fps">&mdash;</b></span
@@ -38,6 +46,28 @@
             ><b id="hud-zone" data-testid="zone">&mdash;</b></span
           >
         </div>
+        <aside
+          class="shop-panel"
+          id="shop-panel"
+          aria-labelledby="shop-title"
+          hidden
+        >
+          <header class="shop-panel__header">
+            <div>
+              <h2 id="shop-title">Build</h2>
+              <p id="shop-description">Choose a building, then tap an open tile.</p>
+            </div>
+            <button type="button" class="shop-panel__close" id="shop-close" data-hud-action="close-shop" aria-label="Close build shop">×</button>
+          </header>
+          <div class="shop-items" id="shop-items"></div>
+        </aside>
+        <aside class="placement-banner" id="placement-banner" aria-labelledby="placement-title" hidden>
+          <div class="placement-banner__text">
+            <strong id="placement-title"></strong>
+            <p id="placement-feedback"></p>
+          </div>
+          <button type="button" class="placement-banner__cancel" id="placement-cancel" data-hud-action="cancel-placement">Cancel</button>
+        </aside>
         <aside class="village-hud" id="village-hud" aria-label="Village resources and builders">
           <div class="village-hud__resources" id="village-hud-resources" aria-label="Resources">
             <div class="resource-card" data-testid="resource-gold">
