@@ -183,6 +183,11 @@ export class Hud {
     this.text('label-zoom', t('hud.zoom'));
     this.text('label-tile', t('hud.tile'));
     this.text('label-zone', t('hud.zone'));
+    this.text('shop-toggle', t('shop.title'));
+    this.text('shop-title', t('shop.title'));
+    this.text('shop-description', t('shop.description'));
+    this.text('placement-cancel', t('placement.cancel'));
+    this.el('shop-close')?.setAttribute('aria-label', t('shop.close'));
   }
 
   setHint(): void {
