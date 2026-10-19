@@ -1,0 +1,5 @@
+{
+  "//": "Root tsconfig. Each package/app has its own tsconfig.json extending tsconfig.base.json. `pnpm typecheck` runs tsc in every workspace project (see root package.json).",
+  "files": [],
+  "include": []
+}
