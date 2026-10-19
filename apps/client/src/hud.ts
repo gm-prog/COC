@@ -4,7 +4,8 @@ import {
   type VillageHudSnapshot,
 } from './villageHud';
 import type { BuildingShopItem } from './villageShop';
-import type { ResourceId } from '@coc/sim-core';
+import type { BuildingLevel, ResourceId } from '@coc/sim-core';
+import type { BuildingUpgradeSnapshot } from './villageUpgrade';
 
 /**
  * Thin wrapper over the DOM debug HUD (index.html).
@@ -18,6 +19,7 @@ export class Hud {
   private onSelectBuilding: ((buildingType: string) => void) | null = null;
   private onCancelPlacement: (() => void) | null = null;
   private onCollectResource: ((buildingId: number) => void) | null = null;
+  private onStartUpgrade: ((buildingId: number) => void) | null = null;
 
   private readonly handleHudClick = (event: MouseEvent): void => {
     if (!(event.target instanceof Element)) return;
@@ -42,6 +44,11 @@ export class Hud {
       if (Number.isInteger(buildingId) && buildingId > 0) {
         this.onCollectResource?.(buildingId);
       }
+    } else if (action === 'start-upgrade') {
+      const buildingId = Number(actionElement.dataset.buildingId);
+      if (Number.isInteger(buildingId) && buildingId > 0) {
+        this.onStartUpgrade?.(buildingId);
+      }
     }
   };
 
@@ -58,10 +65,12 @@ export class Hud {
     onSelectBuilding: (buildingType: string) => void;
     onCancelPlacement: () => void;
     onCollectResource: (buildingId: number) => void;
+    onStartUpgrade: (buildingId: number) => void;
   }): void {
     this.onSelectBuilding = handlers.onSelectBuilding;
     this.onCancelPlacement = handlers.onCancelPlacement;
     this.onCollectResource = handlers.onCollectResource;
+    this.onStartUpgrade = handlers.onStartUpgrade;
   }
 
   isShopOpen(): boolean {
@@ -333,6 +342,7 @@ export class Hud {
       level?: number;
       entityId?: number;
       collection?: { resource: ResourceId; amount: number };
+      upgrade?: BuildingUpgradeSnapshot;
     } | null,
   ): void {
     const panel = this.el('selection-panel');
@@ -387,5 +397,122 @@ export class Hud {
         delete collectButton.dataset.buildingId;
       }
     }
+
+    this.setUpgradePanel(
+      details.kind === 'building' ? details.upgrade : undefined,
+      details.entityId,
+    );
+  }
+
+  private setUpgradePanel(snapshot: BuildingUpgradeSnapshot | undefined, buildingId?: number): void {
+    const panel = this.el('selection-upgrade');
+    const title = this.el('selection-upgrade-title');
+    const cost = this.el('selection-upgrade-cost');
+    const stats = this.el('selection-upgrade-stats');
+    const status = this.el('selection-upgrade-status');
+    const button = this.el('selection-upgrade-button') as HTMLButtonElement | null;
+    if (!panel || !title || !cost || !stats || !status || !button) return;
+
+    if (!snapshot || snapshot.kind === 'missing') {
+      panel.hidden = true;
+      return;
+    }
+
+    panel.hidden = false;
+    button.hidden = true;
+    button.disabled = true;
+    delete button.dataset.buildingId;
+    cost.textContent = '';
+    stats.textContent = '';
+
+    if (snapshot.kind === 'max_level') {
+      title.textContent = t('upgrade.maxLevel');
+      status.textContent = t('upgrade.maxLevel');
+      return;
+    }
+
+    if (snapshot.kind === 'in_progress') {
+      title.textContent = t('upgrade.inProgress', { level: snapshot.targetLevel });
+      cost.textContent = t('upgrade.remaining', {
+        duration: formatRemainingDuration(snapshot.remainingMs),
+      });
+      stats.textContent = snapshot.target ? this.formatUpgradeStats(snapshot.target) : '';
+      status.textContent = t('upgrade.working');
+      return;
+    }
+
+    title.textContent = t('upgrade.nextLevel', { level: snapshot.target.level });
+    cost.textContent = t('upgrade.costAndTime', {
+      cost: this.formatUpgradeResources(snapshot.target.cost),
+      duration: formatRemainingDuration(snapshot.durationMs),
+    });
+    stats.textContent = this.formatUpgradeStats(snapshot.target);
+
+    if (snapshot.kind === 'available') {
+      status.textContent = t('upgrade.available');
+      button.hidden = false;
+      button.disabled = false;
+    } else {
+      status.textContent = this.upgradeBlockReason(snapshot);
+      button.hidden = false;
+      button.disabled = true;
+    }
+
+    if (buildingId !== undefined) {
+      button.dataset.buildingId = String(buildingId);
+      button.setAttribute(
+        'aria-label',
+        t('upgrade.startNamed', { level: snapshot.target.level }),
+      );
+    }
+    button.textContent = t('upgrade.start');
+  }
+
+  private upgradeBlockReason(
+    snapshot: Extract<BuildingUpgradeSnapshot, { kind: 'blocked' }>,
+  ): string {
+    switch (snapshot.reason) {
+      case 'keep_level_too_low':
+        return t('upgrade.keepLevel', { level: snapshot.requiredKeep });
+      case 'insufficient_resources':
+        return t('upgrade.insufficient');
+      case 'no_builder':
+        return t('upgrade.buildersBusy');
+      case 'already_upgrading':
+        return t('upgrade.alreadyUpgrading');
+      default:
+        return t('upgrade.unavailable');
+    }
+  }
+
+  private formatUpgradeResources(resources: object): string {
+    const parts = Object.entries(resources)
+      .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && entry[1] > 0)
+      .map((entry) => entry[1] + ' ' + t(('resource.' + entry[0]) as TranslationKey));
+    return parts.length > 0 ? parts.join(' · ') : t('shop.free');
+  }
+
+  private formatUpgradeStats(target: BuildingLevel): string {
+    const parts = [t('upgrade.hp', { amount: target.hp })];
+    if (target.produces && target.productionPerHour !== undefined) {
+      parts.push(
+        t('upgrade.production', {
+          amount: target.productionPerHour,
+          resource: t(('resource.' + target.produces) as TranslationKey),
+        }),
+      );
+    }
+    if (target.storageCap) {
+      parts.push(t('upgrade.storage', { amount: this.formatUpgradeResources(target.storageCap) }));
+    }
+    if (target.bufferCap !== undefined) {
+      parts.push(t('upgrade.buffer', { amount: target.bufferCap }));
+    }
+    if (target.housing !== undefined) parts.push(t('upgrade.housing', { amount: target.housing }));
+    if (target.queueSlots !== undefined) {
+      parts.push(t('upgrade.queueSlots', { amount: target.queueSlots }));
+    }
+    if (target.dps !== undefined) parts.push(t('upgrade.dps', { amount: target.dps }));
+    return parts.join(' · ');
   }
 }

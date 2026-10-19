@@ -27,6 +27,7 @@ import { t, type TranslationKey } from '../i18n';
 import { buildVillageHudSnapshot } from '../villageHud';
 import { previewBuildingPlacement } from '../villagePlacement';
 import { listBuildingShopItems } from '../villageShop';
+import { getBuildingUpgradeSnapshot } from '../villageUpgrade';
 import {
   findVillageEntityAtTile,
   listVillageEntities,
@@ -148,6 +149,7 @@ export class BootScene extends Phaser.Scene {
       onSelectBuilding: (buildingType) => this.beginPlacement(buildingType),
       onCancelPlacement: () => this.cancelPlacement(),
       onCollectResource: (buildingId) => this.collectResourceFromBuilding(buildingId),
+      onStartUpgrade: (buildingId) => this.startBuildingUpgrade(buildingId),
     });
 
     this.world = this.add.container(0, 0);
@@ -585,6 +587,12 @@ export class BootScene extends Phaser.Scene {
         x: entity.instance.x,
         y: entity.instance.y,
         level: entity.instance.level,
+        upgrade: getBuildingUpgradeSnapshot(
+          this.playerState,
+          GAME_CONFIG,
+          entity.instance.id,
+          this.getNow(),
+        ),
         ...(level?.produces
           ? {
               collection: {
@@ -685,6 +693,34 @@ export class BootScene extends Phaser.Scene {
       ease: 'Cubic.Out',
       onComplete: () => floating.destroy(),
     });
+  }
+
+  private startBuildingUpgrade(buildingId: number): void {
+    const now = this.getNow();
+    const result = applyCommand(
+      this.playerState,
+      {
+        id: 'upgrade-' + now + '-' + buildingId,
+        type: 'StartUpgrade',
+        payload: { buildingId },
+      },
+      { config: GAME_CONFIG, now },
+    );
+
+    if (!result.ok) {
+      this.refreshSelectionAfterCatchUp();
+      this.hud.setVillageSnapshot(
+        buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
+      );
+      return;
+    }
+
+    this.playerState = result.state;
+    this.hud.setVillageSnapshot(
+      buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
+    );
+    this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
+    this.refreshSelectionAfterCatchUp();
   }
 
   private beginPlacement(buildingType: string): void {
