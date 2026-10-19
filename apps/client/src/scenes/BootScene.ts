@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { CONFIG_VERSION } from '@coc/game-data';
+import { CONFIG_VERSION } from '@coc/game-data/version';
 import { PROTOCOL_VERSION } from '@coc/protocol';
 import { GRID, SIM_CORE_VERSION } from '@coc/sim-core';
 import {

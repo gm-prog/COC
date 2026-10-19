@@ -82,3 +82,81 @@ bottom edge. Same reasoning will apply to the battle replay camera in Phase 6.
 script. pnpm 12 blocks dependency build scripts by default, so
 `onlyBuiltDependencies: [esbuild]` is set in `pnpm-workspace.yaml`. Without it a
 fresh `pnpm install` reports `ERR_PNPM_IGNORED_BUILDS`.
+
+## D11 · 2026-10-19 · `requiresKeep` is a per-level unlock table, not a global ceiling
+
+The first draft validated `level.requiresKeep <= building.unlock.keepLevel` for every level. That
+is wrong for progressive upgrades: it forbids a building that unlocks at Keep 1 from demanding a
+higher Keep for its later levels, which is exactly the gating the spec's "Max bldg level" table
+(§7.3) describes.
+
+Replaced with two rules that do hold:
+
+1. **Level 1 may not require a higher Keep than the building's own unlock** — otherwise the
+   building could never be placed at all.
+2. **`requiresKeep` must be non-decreasing across levels** — otherwise the table is not a
+   progression.
+
+Higher levels _may_ demand a higher Keep than the unlock. `PlaceBuilding` enforces the same rule
+at runtime and returns `keep_level_too_low` with the offending level.
+
+- **Impact:** the starter village (Keep 1, walls unlocking at Keep 2) validates correctly, which
+  it did not before.
+
+## D12 · 2026-10-19 · `@coc/game-data/version` is a dependency-free subpath export
+
+The client stamps `configVersion` into every command and needs `CONFIG_VERSION` to do it. Importing
+`@coc/game-data` would have pulled the whole Zod-validated barrel — and therefore Zod — into the
+browser bundle. `packages/game-data/src/version.ts` exports the constant with **zero imports**, is
+re-exported by the barrel, and is exposed as a `./version` subpath in the package `exports` map.
+`tsconfig.base.json` paths and `apps/client/vite.config.ts` aliases carry a matching entry.
+
+- **Impact:** the client production bundle is byte-identical in size to Phase 0 (1,217.90 kB /
+  335.73 kB gzipped), proving Zod is tree-shaken out. Library packages also gained
+  `sideEffects: false` to make that reliable.
+
+## D13 · 2026-10-19 · Vite aliases must be anchored RegExps, not strings
+
+Vite's `resolve.alias` with a **string** key is a _prefix_ match, so `'@coc/game-data'` also
+captured `'@coc/game-data/version'` and resolved it to `…/src/index.ts/version`, breaking the
+client build. The aliases are now derived from the `workspaceAliases` record as
+`{ find: new RegExp('^' + escaped + '$'), replacement: target }`.
+
+- **Impact:** the record stays the single source of truth (`test/config.test.ts` still parses it
+  and compares it against `tsconfig.base.json` paths), so the drift guard keeps working.
+- **Lesson:** never add a workspace subpath export without anchoring the alias.
+
+## D14 · 2026-10-19 · RNG state is unsigned throughout
+
+`serializeRng` wrote the internal state with `>>> 0` while `nextUint32` stored it with `| 0`. A
+state that had wrapped past zero therefore came back from `deserializeRng` as a different number,
+and a battle resumed from a snapshot would have diverged from the original — the exact failure the
+serializable-state requirement exists to prevent.
+
+Fixed by storing the state as an unsigned uint32 everywhere. The arithmetic is unchanged (`^` and
+`Math.imul` operate on the low 32 bits either way), so no drawn value moved and no golden checksum
+in the suite changed. Covered by regression tests that drive the generator past the sign boundary.
+
+## D15 · 2026-10-19 · Zod 4 issues carry no offending value, so `formatIssue` walks the raw data
+
+Zod 4 issue objects expose `code`, `path` and `message` only — no `input`, and enum issues do not
+echo the rejected value. `formatIssue(issue, raw)` therefore walks the issue path through the raw
+config and appends `(received …)`, plus `[allowed: …]` for enum issues, so a failed boot names both
+the path and the bad value. Assertions in the suite are written against this shape rather than
+against Zod's message wording, which has already changed once between 4.x minors.
+
+## D16 · 2026-10-19 · Config tables are arrays, not id-keyed objects
+
+`buildings.json` was first authored as an object keyed by building id. The Zod schema wants arrays
+(spec §8.1 lists buildings as a list), and an object silently fails the whole load. Arrays also
+keep the file order meaningful for display and let duplicate-id detection be a real check rather
+than an impossibility.
+
+## D17 · 2026-10-19 · `GRID`/`GridGeometry` live in `src/config/geometry.ts`, and `deepClone` in `src/state/clone.ts`
+
+Deviation from the Phase 1 file list as planned in PROGRESS.md: the grid constants were pulled out
+of `state/index.ts` into their own module so `grid/` can import them without a cycle, and the clone
+sits beside the state it clones for the same reason. `packages/game-data/tsconfig.build.json` was
+deleted — `build` and `typecheck` are both `tsc --noEmit` there, because `exports` points at source
+(D2) and nothing consumes `dist/` yet. The planned `gen:balance` script was dropped: there are no
+curve parameters to generate from yet.

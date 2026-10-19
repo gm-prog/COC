@@ -19,13 +19,16 @@ export default defineConfig({
     reporters: 'default',
     coverage: {
       provider: 'v8',
-      include: ['packages/*/src/**/*.ts', 'apps/*/src/**/*.ts'],
+      // The rules core is the thing that must be covered; the client and server
+      // get their own smoke layers in later phases.
+      include: ['packages/sim-core/src/**/*.ts'],
+      reporter: ['text', 'text-summary'],
       thresholds: {
-        // Raised per-package as rules land in Phase 1+.
-        lines: 0,
-        functions: 0,
-        statements: 0,
-        branches: 0,
+        // Phase 1 "Done when": >= 90% line coverage on state, grid and commands.
+        lines: 90,
+        functions: 90,
+        statements: 90,
+        branches: 85,
       },
     },
   },

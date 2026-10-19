@@ -1,38 +1,135 @@
 /**
  * @coc/sim-core — the single deterministic rules core for Emberhold.
  *
- * Everything the client, server, replays, AI and tests need to agree on lives
- * here. Phase 0 only lays down the invariants that the rest of the game hangs
- * off (world/grid geometry + version stamps); the real modules land in Phase 1
- * (math, rng, grid, state, commands), Phase 2 (economy) and Phase 5 (battle).
+ * Phase 1 lays the foundation every later phase hangs on:
+ *   math     fixed-point / integer-only maths
+ *   rng      seeded, pure, serialisable PRNG
+ *   grid     tile occupancy and footprint checks
+ *   config   the shapes every tunable number must satisfy
+ *   validate Zod schemas that fail loudly on bad balance data
+ *   state    the authoritative player state
+ *   commands applyCommand(state, command, ctx) — pure, typed, event-producing
+ *   serialize stable JSON + hashState() for determinism checks
  *
- * Hard rules for this package (Section 6.4 of docs/GAME_SPEC.md):
+ * Hard rules for this package (design spec Section 6.4):
  *   - no DOM, no Node APIs, no `Date.now()`, no `Math.random()`
- *   - integer / fixed-point math only (1 tile = 1,000 sim units)
+ *   - integer / fixed-point maths only (1 tile = 1,000 sim units)
  *   - stable iteration order (ascending numeric id)
+ *   - pure functions: same input => same output, on every machine
  */
 
-/** Version of the rules in this package. Bump on any behaviour change. */
 export const SIM_CORE_VERSION = '0.1.0' as const;
 
-/**
- * World geometry.
- *
- * The map is a square tile grid. `total` includes the decorative margin;
- * `buildable` is the area the player may place buildings in. Rendering is
- * isometric 2:1, but nothing in this package knows about screen space.
- */
-export interface GridGeometry {
-  /** Total map size in tiles (including margin). */
-  readonly total: number;
-  /** Buildable area size in tiles. */
-  readonly buildable: number;
-  /** Decorative margin in tiles on each side: (total - buildable) / 2. */
-  readonly margin: number;
-}
+// math
+export {
+  FIXED_ONE,
+  TICKS_PER_SECOND,
+  TICK_MS,
+  clamp,
+  clampInt,
+  roundToNearest,
+  toFixedUnits,
+  fromFixedUnits,
+  fixedMul,
+  fixedDiv,
+  isqrt,
+  hypotFixed,
+  distanceFixed,
+  chebyshevTiles,
+  distanceSquaredTiles,
+} from './math/index.js';
 
-export const GRID: GridGeometry = Object.freeze({
-  total: 48,
-  buildable: 40,
-  margin: 4,
-});
+// rng
+export {
+  createRng,
+  nextUint32,
+  nextFloat,
+  nextInt,
+  nextChance,
+  nextPick,
+  serializeRng,
+  deserializeRng,
+  deriveSeed,
+  type RngState,
+} from './rng/index.js';
+
+// grid
+export {
+  OccupancyGrid,
+  rectsOverlap,
+  rectContains,
+  type Rect,
+  type CellConflict,
+} from './grid/index.js';
+
+// config
+export {
+  GRID,
+  assertValidGeometry,
+  isBuildableTile,
+  isMapTile,
+  type GridGeometry,
+} from './config/geometry.js';
+export {
+  RESOURCE_IDS,
+  type ResourceId,
+  type ResourceAmount,
+  type BuildingCategory,
+  type BuildingDef,
+  type BuildingLevel,
+  type BuildingSize,
+  type ObstacleDef,
+  type StarterConfig,
+  type StarterBuilding,
+  type StarterObstacle,
+  type GameConfig,
+} from './config/types.js';
+
+// validate
+export {
+  ConfigValidationError,
+  validateGameConfig,
+  loadGameConfig,
+  validateBuildingDefs,
+  type ValidatedGameConfig,
+} from './validate/index.js';
+
+// state
+export {
+  STATE_VERSION,
+  createNewPlayerState,
+  findKeep,
+  isKeepLevelConsistent,
+  highestEntityId,
+  clonePlayerState,
+  deepClone,
+  type PlayerState,
+  type BuildingInstance,
+  type ObstacleInstance,
+  type BuilderAssignment,
+  type TrainingQueueItem,
+  type ResearchState,
+} from './state/index.js';
+
+// commands
+export {
+  applyCommand,
+  type CommandContext,
+  type CommandError,
+  type CommandErrorCode,
+  type CommandResult,
+  type GameCommand,
+  type GameEvent,
+  type PlaceBuildingPayload,
+  type MoveBuildingPayload,
+  type RemoveObstaclePayload,
+} from './commands/index.js';
+
+// serialize
+export {
+  stableStringify,
+  stableParse,
+  hashString,
+  hashValue,
+  hashState,
+} from './serialize/index.js';

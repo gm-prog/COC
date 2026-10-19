@@ -1,21 +1,54 @@
 /**
- * @coc/game-data — every tunable number in Emberhold lives here, never in logic.
+ * @coc/game-data — every tunable number in Emberhold.
  *
- * Phase 0 only stamps the config version. The actual tables (Keep levels,
- * buildings, troops, spells, traps) and `scripts/gen-balance.ts` arrive in
- * Phase 1/2; consumers must always read numbers from this package rather than
- * hard-coding them.
+ * The JSON files in `data/` are the authored source of truth; `scripts/`
+ * (Phase 2) will generate the level tables from curves. Nothing in here contains
+ * a rule: it only carries data that `@coc/sim-core` validates and applies.
  */
 
-/** Current balance/config version. Stored on player state and every battle. */
-export const CONFIG_VERSION = '0.1.0' as const;
+import { validateGameConfig, type GameConfig } from '@coc/sim-core';
 
-export type ConfigVersion = typeof CONFIG_VERSION;
+import buildings from '../data/buildings.json';
+import obstacles from '../data/obstacles.json';
+import starter from '../data/starter.json';
+
+import { CONFIG_VERSION } from './version.js';
+
+export { CONFIG_VERSION, type ConfigVersion } from './version.js';
+export { RESOURCE_IDS, type ResourceId } from '@coc/sim-core';
+
+/** The raw authored tables, before validation. Exported for tooling and tests. */
+export const rawConfig = {
+  version: CONFIG_VERSION,
+  buildings,
+  obstacles,
+  starter,
+} as const;
 
 /**
- * The set of resources defined by the design (Section 7.2).
- * Kept here (not in sim-core) because it is balance data, not a rule.
+ * The validated config every consumer should use.
+ *
+ * Validation runs at module load, so a bad balance table breaks the app
+ * immediately with a readable error instead of surfacing as a weird bug three
+ * phases later.
  */
-export const RESOURCE_IDS = ['gold', 'essence', 'shards', 'gems'] as const;
+export const GAME_CONFIG: GameConfig = validateGameConfig(rawConfig);
 
-export type ResourceId = (typeof RESOURCE_IDS)[number];
+/** Re-validates raw data (used by tests and the balance simulator). */
+export function loadGameConfig(raw: unknown): GameConfig {
+  return validateGameConfig(raw);
+}
+
+/** Convenience lookup helpers. */
+export function getBuildingDef(config: GameConfig, id: string) {
+  return config.buildings.find((building) => building.id === id);
+}
+
+export function getBuildingLevel(config: GameConfig, id: string, level: number) {
+  const def = getBuildingDef(config, id);
+  return def?.levels.find((entry) => entry.level === level);
+}
+
+export function getObstacleDef(config: GameConfig, id: string) {
+  return config.obstacles.find((obstacle) => obstacle.id === id);
+}

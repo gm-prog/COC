@@ -1,0 +1,23 @@
+{
+  "resources": {
+    "gold": 1000,
+    "essence": 1000,
+    "shards": 0,
+    "gems": 50
+  },
+  "builders": 2,
+  "buildings": [
+    { "type": "keep", "level": 1, "x": 18, "y": 18 },
+    { "type": "gold_mine", "level": 1, "x": 14, "y": 17 },
+    { "type": "essence_well", "level": 1, "x": 23, "y": 17 }
+  ],
+  "obstacles": [
+    { "type": "tree", "x": 8, "y": 8 },
+    { "type": "rock", "x": 6, "y": 20 },
+    { "type": "tree", "x": 10, "y": 30 },
+    { "type": "rock", "x": 38, "y": 28 },
+    { "type": "tree", "x": 34, "y": 12 },
+    { "type": "tree", "x": 12, "y": 30 },
+    { "type": "rock", "x": 32, "y": 14 }
+  ]
+}

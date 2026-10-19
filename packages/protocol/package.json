@@ -22,5 +22,6 @@
     "watch": "tsc --noEmit -p tsconfig.json --watch"
   },
   "dependencies": {},
-  "devDependencies": {}
+  "devDependencies": {},
+  "sideEffects": false
 }

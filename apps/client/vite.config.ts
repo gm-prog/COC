@@ -11,8 +11,19 @@ const here = (relative: string): string => fileURLToPath(new URL(relative, impor
 export const workspaceAliases: Record<string, string> = {
   '@coc/sim-core': here('../../packages/sim-core/src/index.ts'),
   '@coc/game-data': here('../../packages/game-data/src/index.ts'),
+  // Dependency-free subpath: keeps Zod out of the client bundle.
+  '@coc/game-data/version': here('../../packages/game-data/src/version.ts'),
   '@coc/protocol': here('../../packages/protocol/src/index.ts'),
 };
+
+/**
+ * Vite's string aliases are prefix matches, which would make `@coc/game-data`
+ * swallow `@coc/game-data/version`. Anchor each one instead.
+ */
+const aliasEntries = Object.entries(workspaceAliases).map(([key, target]) => ({
+  find: new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`),
+  replacement: target,
+}));
 
 export default defineConfig({
   server: {
@@ -30,7 +41,7 @@ export default defineConfig({
     port: 4173,
   },
   resolve: {
-    alias: workspaceAliases,
+    alias: aliasEntries,
   },
   build: {
     target: 'es2022',

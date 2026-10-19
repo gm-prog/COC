@@ -39,5 +39,10 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
+      # sim-core carries coverage thresholds (see vitest.config.ts); a regression
+      # below them fails the build rather than silently shrinking the safety net.
+      - name: Coverage thresholds
+        run: pnpm test:coverage
+
       - name: Build
         run: pnpm build

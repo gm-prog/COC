@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@coc/game-data": "workspace:*",
     "@coc/protocol": "workspace:*",
     "@coc/sim-core": "workspace:*",
     "phaser": "^3.90.0"

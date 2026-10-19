@@ -1,0 +1,148 @@
+[
+  {
+    "id": "keep",
+    "category": "hq",
+    "size": { "w": 4, "h": 4 },
+    "unlock": { "keepLevel": 1 },
+    "levels": [
+      {
+        "level": 1,
+        "hp": 1500,
+        "cost": {},
+        "buildSeconds": 0,
+        "requiresKeep": 1,
+        "storageCap": { "gold": 1000, "essence": 1000 }
+      },
+      {
+        "level": 2,
+        "hp": 2200,
+        "cost": { "gold": 1000, "essence": 1000 },
+        "buildSeconds": 300,
+        "requiresKeep": 1,
+        "storageCap": { "gold": 2000, "essence": 2000 }
+      }
+    ]
+  },
+  {
+    "id": "gold_mine",
+    "category": "economy",
+    "size": { "w": 3, "h": 3 },
+    "unlock": { "keepLevel": 1 },
+    "levels": [
+      {
+        "level": 1,
+        "hp": 300,
+        "cost": { "gold": 150 },
+        "buildSeconds": 20,
+        "requiresKeep": 1,
+        "productionPerHour": 240,
+        "bufferCap": 600
+      },
+      {
+        "level": 2,
+        "hp": 420,
+        "cost": { "gold": 250 },
+        "buildSeconds": 60,
+        "requiresKeep": 2,
+        "productionPerHour": 400,
+        "bufferCap": 1000
+      }
+    ]
+  },
+  {
+    "id": "essence_well",
+    "category": "economy",
+    "size": { "w": 3, "h": 3 },
+    "unlock": { "keepLevel": 1 },
+    "levels": [
+      {
+        "level": 1,
+        "hp": 300,
+        "cost": { "essence": 150 },
+        "buildSeconds": 20,
+        "requiresKeep": 1,
+        "productionPerHour": 240,
+        "bufferCap": 600
+      },
+      {
+        "level": 2,
+        "hp": 420,
+        "cost": { "essence": 250 },
+        "buildSeconds": 60,
+        "requiresKeep": 2,
+        "productionPerHour": 400,
+        "bufferCap": 1000
+      }
+    ]
+  },
+  {
+    "id": "gold_store",
+    "category": "storage",
+    "size": { "w": 3, "h": 3 },
+    "unlock": { "keepLevel": 1 },
+    "levels": [
+      {
+        "level": 1,
+        "hp": 500,
+        "cost": { "gold": 200 },
+        "buildSeconds": 30,
+        "requiresKeep": 1,
+        "storageCap": { "gold": 2500 }
+      },
+      {
+        "level": 2,
+        "hp": 700,
+        "cost": { "gold": 350 },
+        "buildSeconds": 90,
+        "requiresKeep": 2,
+        "storageCap": { "gold": 5000 }
+      }
+    ]
+  },
+  {
+    "id": "essence_store",
+    "category": "storage",
+    "size": { "w": 3, "h": 3 },
+    "unlock": { "keepLevel": 1 },
+    "levels": [
+      {
+        "level": 1,
+        "hp": 500,
+        "cost": { "essence": 200 },
+        "buildSeconds": 30,
+        "requiresKeep": 1,
+        "storageCap": { "essence": 2500 }
+      },
+      {
+        "level": 2,
+        "hp": 700,
+        "cost": { "essence": 350 },
+        "buildSeconds": 90,
+        "requiresKeep": 2,
+        "storageCap": { "essence": 5000 }
+      }
+    ]
+  },
+  {
+    "id": "wall",
+    "category": "wall",
+    "size": { "w": 1, "h": 1 },
+    "unlock": { "keepLevel": 2 },
+    "levels": [
+      {
+        "level": 1,
+        "hp": 300,
+        "cost": { "gold": 10 },
+        "buildSeconds": 5,
+        "requiresKeep": 2
+      },
+      {
+        "level": 2,
+        "hp": 420,
+        "cost": { "gold": 20 },
+        "buildSeconds": 10,
+        "requiresKeep": 2
+      }
+    ]
+  }
+]

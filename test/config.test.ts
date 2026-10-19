@@ -12,6 +12,16 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
 const read = (relative: string): string => readFileSync(`${repoRoot}${relative}`, 'utf8');
 
+/** Parses `'key': here('relative/path')` pairs out of the Vite config. */
+function parseViteAliases(source: string): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const regex = /'([^']+)':\s*here\('([^']+)'\)/g;
+  for (const match of source.matchAll(regex)) {
+    aliases.set(match[1] as string, match[2] as string);
+  }
+  return aliases;
+}
+
 describe('workspace wiring', () => {
   const tsconfig = JSON.parse(read('tsconfig.base.json')) as {
     compilerOptions: { paths: Record<string, string[]> };
@@ -19,13 +29,7 @@ describe('workspace wiring', () => {
   const tsPaths = tsconfig.compilerOptions.paths;
 
   const viteConfig = read('apps/client/vite.config.ts');
-  const aliasRegex =
-    /'(@coc\/[a-z-]+)':\s*here\('\.\.\/\.\.\/(packages\/[a-z-]+\/src\/index\.ts)'\)/g;
-  const viteAliases = new Map<string, string>();
-  for (const match of viteConfig.matchAll(aliasRegex)) {
-    // Alias targets are written relative to apps/client/vite.config.ts.
-    viteAliases.set(match[1], `../../${match[2]}`);
-  }
+  const viteAliases = parseViteAliases(viteConfig);
 
   it('declares the same workspace aliases in tsconfig and in Vite', () => {
     expect([...viteAliases.keys()].sort()).toEqual(Object.keys(tsPaths).sort());
@@ -39,8 +43,15 @@ describe('workspace wiring', () => {
 
   it('only aliases source files that actually exist', () => {
     for (const target of viteAliases.values()) {
+      // Alias targets are written relative to apps/client/vite.config.ts.
       expect(existsSync(`${repoRoot}${target.slice(6)}`)).toBe(true);
     }
+  });
+
+  it('exposes a dependency-free version subpath so the client bundle stays lean', () => {
+    const versionModule = read('packages/game-data/src/version.ts');
+    expect(versionModule).not.toContain('@coc/sim-core');
+    expect(versionModule).not.toContain('zod');
   });
 
   it('keeps the workspace layout from the design spec', () => {
