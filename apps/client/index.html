@@ -143,6 +143,19 @@
             data-hud-action="collect-resource"
             hidden
           >Collect</button>
+          <section class="selection-upgrade" id="selection-upgrade" hidden>
+            <h3 class="selection-upgrade__title" id="selection-upgrade-title"></h3>
+            <p class="selection-upgrade__cost" id="selection-upgrade-cost"></p>
+            <p class="selection-upgrade__stats" id="selection-upgrade-stats"></p>
+            <p class="selection-upgrade__status" id="selection-upgrade-status"></p>
+            <button
+              type="button"
+              class="selection-upgrade__button"
+              id="selection-upgrade-button"
+              data-hud-action="start-upgrade"
+              hidden
+            >Upgrade</button>
+          </section>
         </aside>
         <p class="hud__hint" id="hud-hint" data-testid="hint"></p>
         <p class="hud__versions" id="hud-versions" data-testid="versions"></p>

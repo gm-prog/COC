@@ -32,9 +32,9 @@ Design source of truth: [`docs/GAME_SPEC.md`](docs/GAME_SPEC.md).
 
 Phase 3 is underway. Shipped slices render/select starter buildings and obstacles, show
 resource totals/storage caps and builder countdowns, and provide a config-driven build shop with
-green/red placement previews that commit through sim-core construction rules. The current slice
-adds tap-to-collect with storage-overflow feedback. Upgrade/move controls, obstacles removal UX,
-IndexedDB persistence, and a browser end-to-end smoke test remain outstanding.
+green/red placement previews that commit through sim-core construction rules. The current slice adds tap-to-collect with storage-overflow feedback and previews/starts
+building upgrades through sim-core. Move controls, obstacle-removal UX, IndexedDB persistence, and a
+browser end-to-end smoke test remain outstanding.
 
 | Phase | Title                                | Status         |
 | ----- | ------------------------------------ | -------------- |
