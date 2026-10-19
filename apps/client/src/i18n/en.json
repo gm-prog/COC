@@ -59,5 +59,11 @@
   "placement.valid": "Valid spot",
   "placement.invalid": "Blocked — choose an empty buildable tile",
   "placement.outside": "Move over the village to preview placement",
-  "placement.cancel": "Cancel"
+  "placement.cancel": "Cancel",
+  "selection.buffer": "Stored: {amount} {resource}",
+  "selection.collect": "Collect",
+  "selection.collectNamed": "Collect {amount} {resource}",
+  "collection.floating": "+{amount} {resource}",
+  "collection.floatingOverflow": "+{amount} {resource} · {overflow} lost",
+  "collection.storageFull": "Storage full — buffered resources were lost"
 }
