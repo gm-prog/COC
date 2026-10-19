@@ -1,6 +1,6 @@
 # EMBERHOLD — Gate B: Phase 2 (Economy & Construction)
 
-**Branch:** `arena/e9537d2e-coc` · **Base:** `687f96d` (Gate A, pushed) · **Status:** code complete, all checks green, **not committed, not pushed**
+**Branch:** `arena/e9537d2e-coc` · **Base:** `687f96d` (Gate A, pushed) · **Status:** code complete, all checks green, committed and merged by PR #1.
 
 ---
 
@@ -189,14 +189,14 @@ The rng checksum, clone checksum and clone timing match Gate A exactly. The comm
 
 ## Known gaps
 
-1. **`src/build/index.ts` was reconstructed.** The sandbox was re-cloned at the initial commit mid-session and this one untracked file was lost. It was rewritten from its consumers and its 28-test suite; all checks above were re-run afterwards and pass. It has not been committed anywhere, so its history starts here.
+1. **`src/build/index.ts` was reconstructed.** The sandbox was re-cloned at the initial commit mid-session and this working-tree copy was lost. It was rewritten from its consumers and covered by its regression suite; the reconstructed file is included in PR #1's merged baseline, so its Git history begins with the commit that introduced the reconstruction.
 2. **The builder queue does not exist yet.** Spec §7.5 refunds 50% for "unstarted queue items", but §8.2's state model has only `builders.busy`, and Phase 2 requires a third concurrent upgrade to be _rejected_. So the queued branch of `refundFor` is implemented and unit-tested directly, and `CancelUpgrade` derives "started" from whether a builder is actually assigned — the branch is reachable from a hand-built state but from no Phase 2 command. Recorded as a Phase 4 item.
 3. **`MoveBuilding` and `RemoveObstacle` are still free and instant.** Only `PlaceBuilding` was changed to cost resources and builder time. The config's obstacle `removalSeconds` remains unenforced.
 4. **`level: 0` for a building under construction.** A newly placed building contributes no HP, storage or production until its builder finishes. This is correct behaviour but is a new state shape that Phase 3's client and Phase 6's combat must handle.
 5. **Coverage is 98.09% / 92.49%, below Gate A's 99.33% / 95.88%.** The thresholds are unchanged and comfortably met. The remaining uncovered lines are defense-in-depth branches: the post-clone lookups in `startUpgrade` / `speedUp` / `collectResource` (unreachable because the pre-clone lookup already succeeded) and a few explicit-`undefined` guards in the resource-map loops.
 6. **`speedUpCost` sorts a copy of the anchor table** on every call. The validator guarantees ascending anchors, so this is defensive rather than necessary; it is a small, constant, allocation-free-in-practice cost on a cold path.
 7. **No Playwright binaries in this sandbox**, so the Phaser render path is verified only via dev-server transform, production build and pure-maths unit tests (unchanged from Phase 1, decision D8).
-8. **Not committed, not pushed.** Gate B is a working-tree change set only, per instruction.
+
 
 ---
 
