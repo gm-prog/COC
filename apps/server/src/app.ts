@@ -60,6 +60,12 @@ export async function buildServer(overrides: Partial<ServerConfig> = {}): Promis
 
   applyCors(app, config.corsOrigins);
 
+  app.get('/', async () => ({
+    name: 'emberhold-api',
+    endpoints: ['/health', '/version', '/world'],
+    client: 'the game client is served by the Vite dev server on port 5173',
+  }));
+
   app.get('/health', async (): Promise<HealthResponse> => {
     return {
       status: 'ok',
