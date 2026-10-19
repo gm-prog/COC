@@ -1,0 +1,21 @@
+{
+  "name": "@coc/tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Emberhold developer tooling — balance simulator, base editor, replay CLI (built out from Phase 5 onwards).",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts info",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@coc/game-data": "workspace:*",
+    "@coc/protocol": "workspace:*",
+    "@coc/sim-core": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  }
+}

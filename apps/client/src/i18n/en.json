@@ -1,0 +1,13 @@
+{
+  "app.title": "EMBERHOLD",
+  "boot.loading": "Loading…",
+  "hud.fps": "FPS",
+  "hud.zoom": "Zoom",
+  "hud.tile": "Tile",
+  "hud.zone": "Zone",
+  "hud.hint": "Drag to pan · scroll or pinch to zoom · tap a tile to inspect",
+  "hud.zoneBuildable": "Buildable",
+  "hud.zoneMargin": "Margin",
+  "hud.versions": "protocol {protocol} · sim-core {simCore} · config {config}",
+  "hud.tileNone": "—"
+}
