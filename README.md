@@ -8,7 +8,8 @@ This repository is a **vertical slice → online MVP**, built phase by phase fro
 [`docs/GAME_SPEC.md`](docs/GAME_SPEC.md). It is a from-scratch original design:
 all names, art direction and numbers here are ours.
 
-> **Status:** Phase 0 complete (monorepo, tooling, isometric grid shell).
+> **Status:** Phases 0–2 complete (tooling, sim-core foundations, economy and construction).
+> **Next:** Phase 3 — village scene and building UX.
 > Current milestone: **M1 — offline single-player**.
 
 ## Quick start
