@@ -38,8 +38,8 @@
             ><b id="hud-zone" data-testid="zone">&mdash;</b></span
           >
         </div>
-        <aside class="village-hud" aria-label="Village resources and builders">
-          <div class="village-hud__resources" aria-label="Resources">
+        <aside class="village-hud" id="village-hud" aria-label="Village resources and builders">
+          <div class="village-hud__resources" id="village-hud-resources" aria-label="Resources">
             <div class="resource-card" data-testid="resource-gold">
               <div class="resource-card__row">
                 <span id="resource-gold-label">Gold</span>
@@ -85,7 +85,7 @@
               </div>
             </div>
           </div>
-          <section class="builder-card" aria-label="Builders">
+          <section class="builder-card" id="builder-card" aria-label="Builders">
             <div class="builder-card__icons" id="builder-indicators" aria-label="Builder status"></div>
             <div class="builder-card__details">
               <span class="builder-card__title" id="builders-title">Builders</span>
