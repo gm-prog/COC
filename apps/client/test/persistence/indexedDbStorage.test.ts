@@ -308,4 +308,32 @@ describe('transaction completion contract', () => {
     // save here would lie to the player about their progress.
     await expect(store.write(freshSave(), 0)).rejects.toBeInstanceOf(SaveStorageError);
   });
+
+  it('releases its connection so another tab can upgrade the database', async () => {
+    const factory = new IDBFactory();
+    const instance = new IndexedDbVillageStorage(factory);
+    // Opening happens on first use; this also keeps a connection alive.
+    await instance.write(freshSave(), 0);
+
+    const upgraded = await new Promise<{ blocked: boolean; version: number }>((resolve, reject) => {
+      const request = factory.open(SAVE_DB_NAME, SAVE_DB_VERSION + 1);
+      let blocked = false;
+      request.onblocked = () => {
+        blocked = true;
+      };
+      request.onupgradeneeded = () => {
+        // A future build adding an index or a store. The old connection must
+        // not hold the upgrade hostage.
+      };
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const version = request.result.version;
+        request.result.close();
+        resolve({ blocked, version });
+      };
+    });
+
+    expect(upgraded.blocked).toBe(false);
+    expect(upgraded.version).toBe(SAVE_DB_VERSION + 1);
+  });
 });
