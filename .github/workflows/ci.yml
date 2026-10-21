@@ -14,6 +14,10 @@ jobs:
     name: typecheck · lint · test · build · e2e
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      # `Report browser test failure on the PR` comments on the pull request.
+      pull-requests: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -54,7 +58,47 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Browser smoke test
-        run: pnpm test:e2e
+        run: |
+          set -o pipefail
+          pnpm test:e2e 2>&1 | tee /tmp/e2e.log
+
+      # Actions logs and artifacts are served from hosts that some networks
+      # block, so a browser-test failure is also posted on the pull request:
+      # the tail of the Playwright output plus each `error-context.md` page
+      # snapshot. A single marker comment is reused and updated in place.
+      - name: Report browser test failure on the PR
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo '<!-- playwright-failure -->'
+            echo '### Browser smoke test failed'
+            echo
+            echo '```'
+            tail -n 80 /tmp/e2e.log || true
+            echo '```'
+            for context in test-results/*/error-context.md; do
+              [ -f "$context" ] || continue
+              echo
+              echo '<details><summary>Page snapshot</summary>'
+              echo
+              echo '```yaml'
+              head -n 120 "$context"
+              echo '```'
+              echo '</details>'
+            done
+          } > /tmp/e2e-comment.md
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
+            --jq '.[] | select(.body | contains("<!-- playwright-failure -->")) | .id' \
+            | head -n 1)
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" \
+              -F body=@/tmp/e2e-comment.md > /dev/null
+          else
+            gh pr comment "$PR_NUMBER" --body-file /tmp/e2e-comment.md > /dev/null
+          fi
 
       # Keep the failure evidence: the HTML report plus any traces, screenshots
       # and video that `playwright.config.ts` retains on failure.
