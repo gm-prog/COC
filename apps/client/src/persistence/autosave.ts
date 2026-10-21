@@ -85,6 +85,8 @@ export class VillageAutosave {
   private readonly configVersion: GameConfig['version'];
   private readonly now: () => number;
   private readonly debounceMs: number;
+  private readonly retryMs: number;
+  private readonly maxRetryMs: number;
   private onStatus: ((status: SaveStatus) => void) | undefined;
   private onError: ((error: unknown) => void) | undefined;
   private onConflict: ((info: SaveConflict) => void) | undefined;
@@ -117,6 +119,8 @@ export class VillageAutosave {
     this.configVersion = options.configVersion;
     this.now = options.now;
     this.debounceMs = options.debounceMs ?? DEFAULT_AUTOSAVE_DEBOUNCE_MS;
+    this.retryMs = options.retryMs ?? DEFAULT_AUTOSAVE_RETRY_MS;
+    this.maxRetryMs = options.maxRetryMs ?? MAX_AUTOSAVE_RETRY_MS;
     this.baseRevision = options.baseRevision ?? 0;
     this.onStatus = options.onStatus;
     this.onError = options.onError;
@@ -228,6 +232,20 @@ export class VillageAutosave {
     timer.unref?.();
   }
 
+  /**
+   * Schedules the retry that stops a failed write from stranding the snapshot.
+   *
+   * Exponential backoff, capped: a store that fails once is retried quickly, a
+   * store that keeps failing is retried rarely instead of being hammered.
+   */
+  private armRetry(): void {
+    if (this.disposed || this.conflict !== undefined) return;
+    if (this.pending === undefined) return;
+    const exponent = Math.min(Math.max(this.consecutiveFailures - 1, 0), 5);
+    const delay = Math.min(this.retryMs * 2 ** exponent, this.maxRetryMs);
+    this.armTimer(delay);
+  }
+
   private clearTimer(): void {
     if (this.timer !== undefined) {
       clearTimeout(this.timer);
@@ -282,6 +300,9 @@ export class VillageAutosave {
             this.consecutiveFailures += 1;
             this.setStatus('blocked');
             this.onError?.(error);
+            // The critical line: arm a retry so the snapshot cannot be
+            // stranded by a timer that was consumed joining this loop.
+            this.armRetry();
             return;
           }
         }

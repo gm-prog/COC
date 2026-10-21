@@ -254,3 +254,195 @@ describe('village autosave', () => {
     }
   });
 });
+
+/**
+ * Storage double whose writes are settled by the test.
+ *
+ * Deterministic by construction: there are no sleeps and no guessed timings, so
+ * "A is still in flight when B arrives" is a fact the test creates, not a race
+ * it hopes for.
+ */
+class DeferredStorage implements VillageStorage {
+  readonly attempts: { save: VillageSave; expectedRevision: number }[] = [];
+  private readonly waiting: Array<{
+    resolve: (result: VillageWriteResult) => void;
+    reject: (error: unknown) => void;
+  }> = [];
+
+  read(): Promise<unknown> {
+    return Promise.resolve(undefined);
+  }
+
+  write(save: VillageSave, expectedRevision: number): Promise<VillageWriteResult> {
+    this.attempts.push({ save, expectedRevision });
+    return new Promise<VillageWriteResult>((resolve, reject) => {
+      this.waiting.push({ resolve, reject });
+    });
+  }
+
+  get inFlight(): number {
+    return this.waiting.length;
+  }
+
+  /** Commits the oldest outstanding write. */
+  commitOldest(): void {
+    const next = this.waiting.shift();
+    if (!next) throw new Error('no write in flight');
+    next.resolve({ ok: true, revision: this.attempts.length });
+  }
+
+  /** Fails the oldest outstanding write. */
+  failOldest(): void {
+    const next = this.waiting.shift();
+    if (!next) throw new Error('no write in flight');
+    next.reject(new SaveStorageError('disk full'));
+  }
+}
+
+/** Lets the autosave's internal await chain run until `done` holds. */
+async function until(done: () => boolean, label: string): Promise<void> {
+  for (let spin = 0; spin < 200; spin += 1) {
+    if (done()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
+describe('autosave: a failed write must not strand the newest snapshot', () => {
+  it('retries the snapshot whose timer was consumed while A was in flight', async () => {
+    const storage = new DeferredStorage();
+    const statuses: SaveStatus[] = [];
+    const autosave = new VillageAutosave(storage, {
+      configVersion: GAME_CONFIG.version,
+      now: () => START,
+      debounceMs: 1,
+      retryMs: 5,
+      maxRetryMs: 20,
+      onStatus: (status) => statuses.push(status),
+    });
+
+    // 1. Queue A and start writing it.
+    autosave.schedule(stateWithGold(900));
+    const flushA = autosave.flush();
+    await until(() => storage.inFlight === 1, 'write A to start');
+
+    // 2. Queue B while A is still in flight.
+    autosave.schedule(stateWithGold(800));
+    // 3. B's debounce fires now. `ensureLoop` joins the in-flight loop and the
+    //    timer is consumed — the exact stranding scenario.
+    const flushB = autosave.flush();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(storage.attempts).toHaveLength(1);
+
+    // 4. A fails.
+    storage.failOldest();
+    await Promise.all([flushA, flushB]);
+
+    expect(autosave.currentStatus).toBe('blocked');
+    expect(autosave.hasPendingWrite).toBe(true);
+    expect(statuses).not.toContain('saved');
+
+    // 5. The armed retry writes B — nothing was stranded.
+    await until(() => storage.inFlight === 1, 'the retry to start');
+    expect(storage.attempts).toHaveLength(2);
+    storage.commitOldest();
+    await until(() => autosave.currentStatus === 'saved', 'the retry to commit');
+
+    expect(storage.attempts[1]!.save.state.resources.gold).toBe(800);
+    expect(storage.attempts[1]!.expectedRevision).toBe(0);
+    expect(autosave.hasPendingWrite).toBe(false);
+    autosave.dispose();
+  });
+
+  it('lets a later flush write the snapshot a failure preserved', async () => {
+    const storage = new DeferredStorage();
+    const autosave = new VillageAutosave(storage, {
+      configVersion: GAME_CONFIG.version,
+      now: () => START,
+      debounceMs: 1,
+      // Long enough that the retry cannot fire during this test: recovery is
+      // then unambiguously the second flush's doing.
+      retryMs: 10_000,
+      onStatus: () => undefined,
+    });
+
+    autosave.schedule(stateWithGold(700));
+    const failing = autosave.flush();
+    await until(() => storage.inFlight === 1, 'the first write');
+    storage.failOldest();
+    await failing;
+
+    expect(autosave.currentStatus).toBe('blocked');
+    expect(autosave.hasPendingWrite).toBe(true);
+
+    const recovering = autosave.flush();
+    await until(() => storage.inFlight === 1, 'the recovery write');
+    storage.commitOldest();
+    await recovering;
+
+    expect(autosave.currentStatus).toBe('saved');
+    expect(storage.attempts).toHaveLength(2);
+    expect(storage.attempts[1]!.save.state.resources.gold).toBe(700);
+    autosave.dispose();
+  });
+
+  it('backs off instead of hammering a store that keeps failing', async () => {
+    let attempts = 0;
+    const alwaysFails: VillageStorage = {
+      read: () => Promise.resolve(undefined),
+      write: () => {
+        attempts += 1;
+        return Promise.reject(new SaveStorageError('quota'));
+      },
+    };
+
+    const autosave = new VillageAutosave(alwaysFails, {
+      configVersion: GAME_CONFIG.version,
+      now: () => START,
+      debounceMs: 1,
+      retryMs: 20,
+      maxRetryMs: 40,
+      onStatus: () => undefined,
+    });
+
+    autosave.schedule(stateWithGold(100));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    // 20 ms, then 40 ms, then 40 ms: four attempts in 150 ms. A tight retry
+    // loop would produce hundreds and would pin the main thread.
+    expect(attempts).toBeGreaterThanOrEqual(2);
+    expect(attempts).toBeLessThanOrEqual(8);
+    expect(autosave.currentStatus).toBe('blocked');
+    autosave.dispose();
+  });
+
+  it('never reports saved while the newest snapshot is still pending', async () => {
+    const storage = new DeferredStorage();
+    const statuses: SaveStatus[] = [];
+    const autosave = new VillageAutosave(storage, {
+      configVersion: GAME_CONFIG.version,
+      now: () => START,
+      debounceMs: 1,
+      retryMs: 10_000,
+      onStatus: (status) => statuses.push(status),
+    });
+
+    autosave.schedule(stateWithGold(500));
+    const writing = autosave.flush();
+    await until(() => storage.inFlight === 1, 'the first write');
+    autosave.schedule(stateWithGold(400)); // queues a newer snapshot
+    storage.commitOldest();
+    // The loop should immediately take the newer snapshot rather than declaring
+    // the older one's success to be the end of the story.
+    await until(() => storage.inFlight === 1, 'the second write');
+    expect(statuses).not.toContain('saved');
+
+    storage.commitOldest();
+    await writing;
+    await until(() => autosave.currentStatus === 'saved', 'the final commit');
+    expect(storage.attempts.map((attempt) => attempt.save.state.resources.gold)).toEqual([
+      500, 400,
+    ]);
+    autosave.dispose();
+  });
+});
