@@ -85,6 +85,15 @@ export function saveIndicatorForProblem(problem: SaveProblemCode): SaveIndicator
  */
 export class Hud {
   private readonly root: HTMLElement;
+  /**
+   * Banner copy for the standing instruction of the open mode.
+   *
+   * Placement is usually "tap a tile", but wall placement is a drag, so the
+   * scene overrides it when it enters that mode. Held here rather than passed
+   * through every feedback call so the banner's `none` state always means
+   * "what to do now".
+   */
+  private placementInstructionsKey: TranslationKey = 'placement.instructions';
   private onSelectBuilding: ((buildingType: string) => void) | null = null;
   private onCancelPlacement: (() => void) | null = null;
   private onCollectResource: ((buildingId: number) => void) | null = null;
@@ -246,7 +255,13 @@ export class Hud {
     }
   }
 
-  setPlacementMode(buildingType: string | null): void {
+  setPlacementMode(
+    buildingType: string | null,
+    options?: { instructionsKey?: TranslationKey },
+  ): void {
+    // Reset before the null branch, so a cancelled wall mode cannot leave its
+    // drag copy behind for the next building.
+    this.placementInstructionsKey = options?.instructionsKey ?? 'placement.instructions';
     this.showBanner(
       buildingType === null
         ? null
@@ -292,6 +307,10 @@ export class Hud {
       if (state === 'invalid') banner.classList.add('placement-banner--invalid');
     }
     // `none` is the standing instruction for the mode; the others are results.
+    if (kind === 'placement' && state === 'none') {
+      this.text('placement-feedback', t(this.placementInstructionsKey));
+      return;
+    }
     const suffix = state === 'none' ? 'instructions' : state;
     this.text('placement-feedback', t(`${kind}.${suffix}` as TranslationKey));
   }
