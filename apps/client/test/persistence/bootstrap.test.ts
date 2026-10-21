@@ -1,13 +1,20 @@
 import { describe, expect, it } from 'vitest';
+import { IDBFactory } from 'fake-indexeddb';
 import { GAME_CONFIG } from '@coc/game-data';
 import { applyCommand, catchUp, createNewPlayerState, type PlayerState } from '@coc/sim-core';
 import { Hud, saveIndicatorForProblem } from '../../src/hud';
+import { t } from '../../src/i18n';
 import {
   bootstrapVillage,
   unsavedVillage,
   type VillageBootstrap,
 } from '../../src/persistence/bootstrap';
 import {
+  IndexedDbVillageStorage,
+  SAVE_DB_NAME,
+  SAVE_DB_VERSION,
+  SAVE_KEY,
+  SAVE_STORE_NAME,
   SaveStorageError,
   createSave,
   loadVillage,
@@ -66,6 +73,49 @@ function renderSaveIndicator(village: VillageBootstrap): {
   hud.dispose();
 
   return { textContent: node.textContent, hidden: node.hidden, state: node.dataset.saveState };
+}
+
+function openRaw(factory: IDBFactory): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = factory.open(SAVE_DB_NAME, SAVE_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SAVE_STORE_NAME)) {
+        db.createObjectStore(SAVE_STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+/** Writes through a second connection, as another tab or a buggy writer would. */
+async function writeRawRecord(factory: IDBFactory, value: unknown): Promise<void> {
+  const db = await openRaw(factory);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(SAVE_STORE_NAME, 'readwrite');
+      tx.objectStore(SAVE_STORE_NAME).put(value, SAVE_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function readRawRecord(factory: IDBFactory): Promise<unknown> {
+  const db = await openRaw(factory);
+  try {
+    return await new Promise<unknown>((resolve, reject) => {
+      const tx = db.transaction(SAVE_STORE_NAME, 'readonly');
+      const request = tx.objectStore(SAVE_STORE_NAME).get(SAVE_KEY);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    db.close();
+  }
 }
 
 function placeGoldMine(state: PlayerState, now = START): PlayerState {
@@ -352,6 +402,97 @@ describe('unsavedVillage', () => {
     expect(village.source).toBe('unsaved');
     expect(village.state.resources.gold).toBe(1000);
     expect(village.problem?.code).toBe('storage_unavailable');
+  });
+});
+
+describe('a stored null is not an empty slot', () => {
+  it('reports it as malformed, leaves it in place, and disables saving', async () => {
+    // The whole point: the record exists. Only a *missing* key may mean "new
+    // player"; a null must never be silently replaced by a starter village.
+    const factory = new IDBFactory();
+    await writeRawRecord(factory, null);
+    const storage = new IndexedDbVillageStorage(factory);
+
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START,
+      storage,
+      debounceMs: 0,
+    });
+
+    expect(village.source).toBe('unsaved');
+    expect(village.problem?.code).toBe('malformed');
+    expect(village.autosave).toBeNull();
+    expect(village.reconciled).toBe(false);
+    expect(await readRawRecord(factory)).toBeNull();
+
+    // Playable, but strictly in memory.
+    expect(village.state.resources.gold).toBe(1000);
+
+    storage.close();
+  });
+
+  it('shows the unreadable warning instead of a healthy save indicator', async () => {
+    const factory = new IDBFactory();
+    await writeRawRecord(factory, null);
+    const storage = new IndexedDbVillageStorage(factory);
+
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START,
+      storage,
+      debounceMs: 0,
+    });
+    const indicator = renderSaveIndicator(village);
+
+    expect(indicator.hidden).toBe(false);
+    expect(indicator.state).toBe('unreadable');
+    expect(indicator.textContent).toBe(t('save.unreadable'));
+    // Never claim success: this session is not saving.
+    expect(indicator.textContent).not.toBe(t('save.saved'));
+    expect(indicator.textContent).not.toBe(t('save.saving'));
+
+    storage.close();
+  });
+
+  it('still reads a missing key in an existing store as a new player', async () => {
+    const factory = new IDBFactory();
+    // Creating the database is enough; nothing is written under the key.
+    const db = await openRaw(factory);
+    db.close();
+
+    const storage = new IndexedDbVillageStorage(factory);
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START,
+      storage,
+      debounceMs: 0,
+    });
+
+    expect(village.source).toBe('new');
+    expect(village.problem).toBeNull();
+    expect(village.autosave).not.toBeNull();
+    expect(await readRawRecord(factory)).toBeUndefined();
+    village.autosave?.dispose();
+    storage.close();
+  });
+
+  it('still treats a fresh database as a new player', async () => {
+    const factory = new IDBFactory();
+    const storage = new IndexedDbVillageStorage(factory);
+
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START,
+      storage,
+      debounceMs: 0,
+    });
+
+    expect(village.source).toBe('new');
+    expect(village.problem).toBeNull();
+    expect(village.autosave).not.toBeNull();
+    village.autosave?.dispose();
+    storage.close();
   });
 });
 

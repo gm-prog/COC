@@ -1091,7 +1091,11 @@ export async function loadVillage(
     };
   }
 
-  if (raw === undefined || raw === null) return { status: 'empty' };
+  // Only `undefined` means "no record". IndexedDB returns `undefined` for a
+  // missing key, but a `null` under the key is something a writer actually put
+  // there: treating it as empty would silently replace it with a starter
+  // village. It falls through to validation and is rejected as malformed.
+  if (raw === undefined) return { status: 'empty' };
 
   const migrated = migrateSave(raw);
   if (!migrated.ok) return { status: 'unreadable', problem: migrated.problem };
