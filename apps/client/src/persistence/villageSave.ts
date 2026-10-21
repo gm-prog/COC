@@ -2,8 +2,14 @@ import {
   catchUp,
   clonePlayerState,
   GRID,
+  isBuildableTile,
   isKeepLevelConsistent,
+  isMapTile,
+  KEEP_BUILDING_ID,
+  MAX_BUILDERS,
+  rectsOverlap,
   RESOURCE_IDS,
+  STATE_VERSION,
   type CatchUpEvent,
   type GameConfig,
   type PlayerState,
@@ -325,179 +331,598 @@ export function migrateSave(
 
 // ---------------------------------------------------------------- validation
 
-const RESOURCE_ID_SET = new Set<string>(RESOURCE_IDS);
-
 /**
  * Checks the parts of a `PlayerState` that storage can get wrong.
  *
  * Returns human-readable reasons rather than throwing, so the caller can log a
  * precise diagnosis without a stack trace.
  */
+/** Entity rect used for the overlap check below. */
+interface EntityRect {
+  id: number;
+  label: string;
+  rect: { x: number; y: number; w: number; h: number };
+  valid: boolean;
+}
+
+/** Everything later checks need to know about the validated entities. */
+interface EntityIndex {
+  buildingById: Map<number, Record<string, unknown>>;
+  rects: EntityRect[];
+  ids: Set<number>;
+  /** `state.lastSyncAt` when it is valid; buffers must not be ahead of it. */
+  lastSyncAt: number | undefined;
+}
+
+/**
+ * Validates the parts of a `PlayerState` that storage can get wrong.
+ *
+ * This is deliberately *shape and plausibility*, not a second rules engine.
+ * `sim-core` remains the authority on what a legal command may do; here we only
+ * reject records that could not have come out of this build and config — a
+ * missing field, an impossible coordinate, a builder pointing at a building
+ * that is not in the save, a buffer on something that does not produce.
+ *
+ * Every branch appends a human-readable reason rather than throwing, so a
+ * rejected save produces a precise diagnosis instead of a stack trace.
+ */
 export function validatePersistedState(raw: unknown, config: GameConfig): string[] {
   const problems: string[] = [];
   if (!isRecord(raw)) return ['state is not an object'];
 
-  // Entity types are checked against the running config: a saved building the
-  // current config no longer defines would render and simulate as nothing.
-  const knownBuildingTypes = new Set(config.buildings.map((definition) => definition.id));
-  const knownObstacleTypes = new Set(config.obstacles.map((definition) => definition.id));
+  validateScalars(raw, config, problems);
 
-  if (!isPositiveInteger(raw.version)) problems.push('state.version must be a positive integer');
-  if (typeof raw.configVersion !== 'string') problems.push('state.configVersion must be a string');
-  if (!isPositiveInteger(raw.keepLevel))
-    problems.push('state.keepLevel must be a positive integer');
-  if (!isNonNegativeInteger(raw.lastSyncAt)) {
-    problems.push('state.lastSyncAt must be a non-negative integer timestamp');
-  }
-
-  // Resources hold whole units only (spec §7.1 stores integers; fractional
-  // production lives in a building buffer's remainder, never here).
   if (!isRecord(raw.resources)) {
     problems.push('state.resources must be an object');
   } else {
-    for (const id of RESOURCE_IDS) {
-      if (!isNonNegativeInteger(raw.resources[id])) {
-        problems.push(`state.resources.${id} must be a non-negative integer`);
-      }
-    }
-    for (const key of Object.keys(raw.resources)) {
-      if (!RESOURCE_ID_SET.has(key)) problems.push(`state.resources has unknown resource "${key}"`);
-    }
+    validateResourceTotals(raw.resources, problems);
   }
 
-  const entityIds = new Set<number>();
-  if (!Array.isArray(raw.buildings)) {
-    problems.push('state.buildings must be an array');
-  } else {
-    raw.buildings.forEach((entry: unknown, index: number) => {
-      const at = `state.buildings[${index}]`;
-      if (!isRecord(entry)) {
-        problems.push(`${at} is not an object`);
-        return;
-      }
-      if (!isPositiveInteger(entry.id)) problems.push(`${at}.id must be a positive integer`);
-      else if (entityIds.has(entry.id)) problems.push(`${at}.id ${entry.id} is duplicated`);
-      else entityIds.add(entry.id);
-
-      if (typeof entry.type !== 'string' || entry.type.length === 0) {
-        problems.push(`${at}.type must be a non-empty string`);
-      } else if (!knownBuildingTypes.has(entry.type)) {
-        problems.push(`${at}.type "${entry.type}" is not defined by this config`);
-      }
-      // Level 0 is a building under construction (spec §7.5), so 0 is legal.
-      if (!isNonNegativeInteger(entry.level)) {
-        problems.push(`${at}.level must be a non-negative integer`);
-      }
-      if (!isNonNegativeInteger(entry.x) || entry.x >= GRID.total) {
-        problems.push(`${at}.x must be a tile column inside the ${GRID.total}×${GRID.total} grid`);
-      }
-      if (!isNonNegativeInteger(entry.y) || entry.y >= GRID.total) {
-        problems.push(`${at}.y must be a tile row inside the ${GRID.total}×${GRID.total} grid`);
-      }
-
-      if (entry.upgrade !== undefined) {
-        if (!isRecord(entry.upgrade)) {
-          problems.push(`${at}.upgrade must be an object`);
-        } else {
-          if (!isPositiveInteger(entry.upgrade.toLevel)) {
-            problems.push(`${at}.upgrade.toLevel must be a positive integer`);
-          }
-          if (!isNonNegativeInteger(entry.upgrade.finishAt)) {
-            problems.push(`${at}.upgrade.finishAt must be a non-negative integer timestamp`);
-          }
-        }
-      }
-
-      if (entry.buffer !== undefined) {
-        if (!isRecord(entry.buffer)) {
-          problems.push(`${at}.buffer must be an object`);
-        } else {
-          if (!isNonNegativeInteger(entry.buffer.amount)) {
-            problems.push(`${at}.buffer.amount must be a non-negative integer`);
-          }
-          // The remainder is an exact numerator over `economy.msPerHour`; a
-          // rounded or negative value would silently change production maths.
-          if (!isNonNegativeInteger(entry.buffer.remainder)) {
-            problems.push(`${at}.buffer.remainder must be a non-negative integer`);
-          }
-          if (!isNonNegativeInteger(entry.buffer.lastAccruedAt)) {
-            problems.push(`${at}.buffer.lastAccruedAt must be a non-negative integer timestamp`);
-          }
-        }
-      }
-    });
-  }
-
-  if (!Array.isArray(raw.obstacles)) {
-    problems.push('state.obstacles must be an array');
-  } else {
-    raw.obstacles.forEach((entry: unknown, index: number) => {
-      const at = `state.obstacles[${index}]`;
-      if (!isRecord(entry)) {
-        problems.push(`${at} is not an object`);
-        return;
-      }
-      if (!isPositiveInteger(entry.id)) problems.push(`${at}.id must be a positive integer`);
-      else if (entityIds.has(entry.id)) problems.push(`${at}.id ${entry.id} is already used`);
-      else entityIds.add(entry.id);
-      if (typeof entry.type !== 'string' || entry.type.length === 0) {
-        problems.push(`${at}.type must be a non-empty string`);
-      } else if (!knownObstacleTypes.has(entry.type)) {
-        problems.push(`${at}.type "${entry.type}" is not defined by this config`);
-      }
-      if (!isNonNegativeInteger(entry.x) || entry.x >= GRID.total) {
-        problems.push(`${at}.x must be a tile column inside the ${GRID.total}×${GRID.total} grid`);
-      }
-      if (!isNonNegativeInteger(entry.y) || entry.y >= GRID.total) {
-        problems.push(`${at}.y must be a tile row inside the ${GRID.total}×${GRID.total} grid`);
-      }
-    });
-  }
-
-  if (!isRecord(raw.builders)) {
-    problems.push('state.builders must be an object');
-  } else {
-    if (!isPositiveInteger(raw.builders.count)) {
-      problems.push('state.builders.count must be a positive integer');
-    }
-    if (!Array.isArray(raw.builders.busy)) {
-      problems.push('state.builders.busy must be an array');
-    } else {
-      if (raw.builders.busy.length > (raw.builders.count as number)) {
-        problems.push('state.builders.busy has more assignments than builders');
-      }
-      raw.builders.busy.forEach((entry: unknown, index: number) => {
-        const at = `state.builders.busy[${index}]`;
-        if (!isRecord(entry)) {
-          problems.push(`${at} is not an object`);
-          return;
-        }
-        if (!isPositiveInteger(entry.buildingId) || !entityIds.has(entry.buildingId)) {
-          // A builder assigned to a building that is not in the save would make
-          // completion lookups fail forever — the builder could never be freed.
-          problems.push(`${at}.buildingId must reference a building in the save`);
-        }
-        if (!isPositiveInteger(entry.toLevel)) {
-          problems.push(`${at}.toLevel must be a positive integer`);
-        }
-        if (!isNonNegativeInteger(entry.finishAt)) {
-          problems.push(`${at}.finishAt must be a non-negative integer timestamp`);
-        }
-      });
-    }
-  }
+  const index: EntityIndex = {
+    buildingById: new Map(),
+    rects: [],
+    ids: new Set(),
+    lastSyncAt: isNonNegativeInteger(raw.lastSyncAt) ? raw.lastSyncAt : undefined,
+  };
+  validateBuildings(raw.buildings, config, index, problems);
+  validateObstacles(raw.obstacles, config, index, problems);
+  validateEntityOverlaps(index.rects, problems);
+  validateBuilders(raw.builders, index, problems);
+  validateIdCountMap(raw.army, 'state.army', problems);
+  validateIdCountMap(raw.spells, 'state.spells', problems);
+  validateTrainingQueues(raw.trainingQueues, config, index, problems);
+  validateResearch(raw.research, problems);
 
   // Reuses the sim-core invariant rather than re-deriving the Keep rules.
   if (
-    isRecord(raw) &&
     Array.isArray(raw.buildings) &&
-    entityIds.size > 0 &&
+    index.ids.size > 0 &&
     !isKeepLevelConsistent(raw as unknown as PlayerState)
   ) {
     problems.push('state.keepLevel does not match the completed Keep level');
   }
 
   return problems;
+}
+
+/** Identity, counters and optional fields that do not need the entity graph. */
+function validateScalars(
+  raw: Record<string, unknown>,
+  config: GameConfig,
+  problems: string[],
+): void {
+  if (raw.version !== STATE_VERSION) {
+    problems.push(`state.version must be the supported STATE_VERSION ${STATE_VERSION}`);
+  }
+  if (typeof raw.configVersion !== 'string') {
+    problems.push('state.configVersion must be a string');
+  }
+
+  const keepDef = config.buildings.find((definition) => definition.id === KEEP_BUILDING_ID);
+  const maxKeepLevel =
+    keepDef?.levels.reduce((highest, level) => Math.max(highest, level.level), 0) ?? 0;
+  if (!isPositiveInteger(raw.keepLevel)) {
+    problems.push('state.keepLevel must be a positive integer');
+  } else if (maxKeepLevel > 0 && raw.keepLevel > maxKeepLevel) {
+    problems.push(
+      `state.keepLevel ${raw.keepLevel} exceeds the configured maximum ${maxKeepLevel}`,
+    );
+  }
+
+  if (!isNonNegativeInteger(raw.lastSyncAt)) {
+    problems.push('state.lastSyncAt must be a non-negative integer timestamp');
+  }
+  if (!isNonNegativeInteger(raw.trophies)) {
+    problems.push('state.trophies must be a non-negative integer');
+  }
+  if (!isNonNegativeInteger(raw.tutorialStep)) {
+    problems.push('state.tutorialStep must be a non-negative integer');
+  }
+  if (raw.shieldUntil !== undefined && !isNonNegativeInteger(raw.shieldUntil)) {
+    problems.push('state.shieldUntil must be a non-negative integer timestamp when present');
+  }
+  if (raw.guardUntil !== undefined && !isNonNegativeInteger(raw.guardUntil)) {
+    problems.push('state.guardUntil must be a non-negative integer timestamp when present');
+  }
+
+  if (raw.clan !== undefined) {
+    if (!isRecord(raw.clan)) {
+      problems.push('state.clan must be an object when present');
+    } else {
+      if (typeof raw.clan.clanId !== 'string' || raw.clan.clanId.length === 0) {
+        problems.push('state.clan.clanId must be a non-empty string');
+      }
+      if (typeof raw.clan.role !== 'string' || raw.clan.role.length === 0) {
+        problems.push('state.clan.role must be a non-empty string');
+      }
+    }
+  }
+}
+
+/** Whole-unit resource totals: every known id, nothing unknown, no fractions. */
+function validateResourceTotals(resources: Record<string, unknown>, problems: string[]): void {
+  const known = new Set<string>(RESOURCE_IDS);
+  for (const id of RESOURCE_IDS) {
+    if (!isNonNegativeInteger(resources[id])) {
+      problems.push(`state.resources.${id} must be a non-negative integer`);
+    }
+  }
+  for (const key of Object.keys(resources)) {
+    if (!known.has(key)) problems.push(`state.resources has unknown resource "${key}"`);
+  }
+}
+
+/** `army`/`spells`: identifier -> whole count. */
+function validateIdCountMap(raw: unknown, at: string, problems: string[]): void {
+  if (!isRecord(raw)) {
+    problems.push(`${at} must be an object`);
+    return;
+  }
+  for (const [id, count] of Object.entries(raw)) {
+    if (id.length === 0) problems.push(`${at} has an empty identifier`);
+    if (!isNonNegativeInteger(count)) {
+      problems.push(`${at}.${id} must be a non-negative integer count`);
+    }
+  }
+}
+
+function validateBuildings(
+  raw: unknown,
+  config: GameConfig,
+  index: EntityIndex,
+  problems: string[],
+): void {
+  if (!Array.isArray(raw)) {
+    problems.push('state.buildings must be an array');
+    return;
+  }
+
+  const msPerHour = config.economy.msPerHour;
+
+  raw.forEach((entry: unknown, position: number) => {
+    const at = `state.buildings[${position}]`;
+    if (!isRecord(entry)) {
+      problems.push(`${at} is not an object`);
+      return;
+    }
+
+    if (!isPositiveInteger(entry.id)) {
+      problems.push(`${at}.id must be a positive integer`);
+    } else if (index.ids.has(entry.id)) {
+      problems.push(`${at}.id ${entry.id} is duplicated`);
+    } else {
+      index.ids.add(entry.id);
+      index.buildingById.set(entry.id, entry);
+    }
+
+    const def =
+      typeof entry.type === 'string'
+        ? config.buildings.find((candidate) => candidate.id === entry.type)
+        : undefined;
+    if (typeof entry.type !== 'string' || entry.type.length === 0) {
+      problems.push(`${at}.type must be a non-empty string`);
+    } else if (def === undefined) {
+      problems.push(`${at}.type "${String(entry.type)}" is not defined by this config`);
+    }
+
+    if (def !== undefined) {
+      const levels = def.levels;
+      const maxLevel = levels.reduce((highest, level) => Math.max(highest, level.level), 0);
+
+      // Level 0 is a building under construction (spec §7.5); every other level
+      // must exist in the definition.
+      if (!isNonNegativeInteger(entry.level)) {
+        problems.push(`${at}.level must be a non-negative integer`);
+      } else if (entry.level > maxLevel) {
+        problems.push(`${at}.level ${entry.level} exceeds "${def.id}" maximum ${maxLevel}`);
+      }
+
+      const levelDef =
+        isNonNegativeInteger(entry.level) && entry.level >= 1
+          ? levels.find((candidate) => candidate.level === entry.level)
+          : undefined;
+
+      validateUpgrade(at, entry, levels, problems);
+      validateBuffer(at, entry, levelDef, msPerHour, problems);
+    }
+
+    index.rects.push(buildingRect(at, entry, def, problems));
+  });
+
+  validateWatermarks(index, problems);
+}
+
+/** Upgrade metadata must describe exactly one step up, into a real level. */
+function validateUpgrade(
+  at: string,
+  entry: Record<string, unknown>,
+  levels: readonly { level: number }[],
+  problems: string[],
+): void {
+  if (entry.upgrade === undefined) {
+    // A level-0 building exists only because a builder reserved its footprint;
+    // without an upgrade it would be an orphan that can never finish.
+    if (entry.level === 0) {
+      problems.push(`${at} is at level 0 but has no upgrade in flight`);
+    }
+    return;
+  }
+
+  if (!isRecord(entry.upgrade)) {
+    problems.push(`${at}.upgrade must be an object`);
+    return;
+  }
+
+  const toLevel = entry.upgrade.toLevel;
+  if (!isPositiveInteger(toLevel)) {
+    problems.push(`${at}.upgrade.toLevel must be a positive integer`);
+  } else {
+    if (isNonNegativeInteger(entry.level) && toLevel !== entry.level + 1) {
+      problems.push(
+        `${at}.upgrade.toLevel ${toLevel} is not one level above the current level ${entry.level}`,
+      );
+    }
+    if (!levels.some((candidate) => candidate.level === toLevel)) {
+      problems.push(`${at}.upgrade.toLevel ${toLevel} is not a configured level`);
+    }
+  }
+  if (!isNonNegativeInteger(entry.upgrade.finishAt)) {
+    problems.push(`${at}.upgrade.finishAt must be a non-negative integer timestamp`);
+  }
+}
+
+/**
+ * Collector buffers may exist only on buildings that actually produce at their
+ * current level, and must respect that level's cap and the exact-carry format.
+ */
+function validateBuffer(
+  at: string,
+  entry: Record<string, unknown>,
+  levelDef: { produces?: string; productionPerHour?: number; bufferCap?: number } | undefined,
+  msPerHour: number,
+  problems: string[],
+): void {
+  if (entry.buffer === undefined) return;
+
+  if (!isRecord(entry.buffer)) {
+    problems.push(`${at}.buffer must be an object`);
+    return;
+  }
+
+  const produces =
+    levelDef !== undefined &&
+    levelDef.produces !== undefined &&
+    levelDef.productionPerHour !== undefined &&
+    levelDef.bufferCap !== undefined;
+
+  if (!produces) {
+    problems.push(`${at}.buffer is present but the building does not produce at this level`);
+    return;
+  }
+
+  const buffer = entry.buffer;
+  if (!isNonNegativeInteger(buffer.amount)) {
+    problems.push(`${at}.buffer.amount must be a non-negative integer`);
+  } else if (buffer.amount > (levelDef.bufferCap as number)) {
+    problems.push(
+      `${at}.buffer.amount ${buffer.amount} exceeds the configured cap ${String(levelDef.bufferCap)}`,
+    );
+  }
+
+  // The remainder is an exact numerator over `economy.msPerHour`; a negative or
+  // out-of-range value would silently change production maths.
+  if (!isNonNegativeInteger(buffer.remainder) || buffer.remainder >= msPerHour) {
+    problems.push(`${at}.buffer.remainder must be an integer in [0, ${msPerHour})`);
+  }
+  if (!isNonNegativeInteger(buffer.lastAccruedAt)) {
+    problems.push(`${at}.buffer.lastAccruedAt must be a non-negative integer timestamp`);
+  }
+}
+
+/** Watermarks must not run ahead of the state they belong to. */
+function validateWatermarks(index: EntityIndex, problems: string[]): void {
+  const lastSyncAt = index.lastSyncAt;
+  if (lastSyncAt === undefined) return;
+
+  for (const [id, building] of index.buildingById) {
+    const buffer = building.buffer;
+    if (!isRecord(buffer)) continue;
+    if (isNonNegativeInteger(buffer.lastAccruedAt) && buffer.lastAccruedAt > lastSyncAt) {
+      problems.push(
+        `building ${id} buffer.lastAccruedAt ${buffer.lastAccruedAt} is ahead of state.lastSyncAt ${lastSyncAt}`,
+      );
+    }
+  }
+}
+
+function buildingRect(
+  at: string,
+  entry: Record<string, unknown>,
+  def: { id: string; size: { w: number; h: number } } | undefined,
+  problems: string[],
+): EntityRect {
+  const id = isPositiveInteger(entry.id) ? entry.id : -1;
+  const base: EntityRect = {
+    id,
+    label: at,
+    rect: { x: Number.NaN, y: Number.NaN, w: 0, h: 0 },
+    valid: false,
+  };
+
+  if (!isNonNegativeInteger(entry.x) || !isNonNegativeInteger(entry.y)) {
+    problems.push(`${at}.x and ${at}.y must be non-negative integer tile coordinates`);
+    return base;
+  }
+  if (def === undefined) return base; // unknown type already reported
+
+  const rect = { x: entry.x, y: entry.y, w: def.size.w, h: def.size.h };
+  const bottomRight = { x: rect.x + rect.w - 1, y: rect.y + rect.h - 1 };
+  if (
+    !isBuildableTile(GRID, rect.x, rect.y) ||
+    !isBuildableTile(GRID, bottomRight.x, bottomRight.y)
+  ) {
+    problems.push(
+      `${at} occupies a ${rect.w}×${rect.h} footprint from (${rect.x},${rect.y}) that leaves the ${GRID.buildable}-tile buildable core`,
+    );
+    return base;
+  }
+
+  return { id, label: at, rect, valid: true };
+}
+
+function validateObstacles(
+  raw: unknown,
+  config: GameConfig,
+  index: EntityIndex,
+  problems: string[],
+): void {
+  if (!Array.isArray(raw)) {
+    problems.push('state.obstacles must be an array');
+    return;
+  }
+
+  raw.forEach((entry: unknown, position: number) => {
+    const at = `state.obstacles[${position}]`;
+    if (!isRecord(entry)) {
+      problems.push(`${at} is not an object`);
+      return;
+    }
+
+    if (!isPositiveInteger(entry.id)) {
+      problems.push(`${at}.id must be a positive integer`);
+    } else if (index.ids.has(entry.id)) {
+      problems.push(`${at}.id ${entry.id} is already used`);
+    } else {
+      index.ids.add(entry.id);
+    }
+
+    const def =
+      typeof entry.type === 'string'
+        ? config.obstacles.find((candidate) => candidate.id === entry.type)
+        : undefined;
+    if (typeof entry.type !== 'string' || entry.type.length === 0) {
+      problems.push(`${at}.type must be a non-empty string`);
+    } else if (def === undefined) {
+      problems.push(`${at}.type "${String(entry.type)}" is not defined by this config`);
+    }
+
+    if (!isNonNegativeInteger(entry.x) || !isNonNegativeInteger(entry.y)) {
+      problems.push(`${at}.x and ${at}.y must be non-negative integer tile coordinates`);
+      return;
+    }
+    if (def === undefined) return;
+
+    const rect = { x: entry.x, y: entry.y, w: def.size.w, h: def.size.h };
+    const bottomRight = { x: rect.x + rect.w - 1, y: rect.y + rect.h - 1 };
+    if (!isMapTile(GRID, rect.x, rect.y) || !isMapTile(GRID, bottomRight.x, bottomRight.y)) {
+      problems.push(
+        `${at} occupies a ${rect.w}×${rect.h} footprint that leaves the ${GRID.total}×${GRID.total} map`,
+      );
+      return;
+    }
+
+    index.rects.push({
+      id: isPositiveInteger(entry.id) ? entry.id : -1,
+      label: at,
+      rect,
+      valid: true,
+    });
+  });
+}
+
+/** Two entities may not share a tile; the placement rules depend on it. */
+function validateEntityOverlaps(rects: EntityRect[], problems: string[]): void {
+  const valid = rects.filter((entry) => entry.valid);
+  for (let i = 0; i < valid.length; i += 1) {
+    for (let j = i + 1; j < valid.length; j += 1) {
+      const a = valid[i] as EntityRect;
+      const b = valid[j] as EntityRect;
+      if (rectsOverlap(a.rect, b.rect)) {
+        problems.push(`${a.label} overlaps ${b.label}`);
+      }
+    }
+  }
+}
+
+/** Builders, their count, and the assignments that must mirror upgrades. */
+function validateBuilders(raw: unknown, index: EntityIndex, problems: string[]): void {
+  if (!isRecord(raw)) {
+    problems.push('state.builders must be an object');
+    return;
+  }
+
+  if (!isPositiveInteger(raw.count)) {
+    problems.push('state.builders.count must be a positive integer');
+  } else if (raw.count > MAX_BUILDERS) {
+    problems.push(`state.builders.count ${raw.count} exceeds the maximum ${MAX_BUILDERS}`);
+  }
+
+  if (!Array.isArray(raw.busy)) {
+    problems.push('state.builders.busy must be an array');
+    return;
+  }
+  if (isPositiveInteger(raw.count) && raw.busy.length > raw.count) {
+    problems.push('state.builders.busy has more assignments than builders');
+  }
+
+  const assigned = new Map<number, string[]>();
+  raw.busy.forEach((entry: unknown, position: number) => {
+    const at = `state.builders.busy[${position}]`;
+    if (!isRecord(entry)) {
+      problems.push(`${at} is not an object`);
+      return;
+    }
+
+    if (!isPositiveInteger(entry.buildingId)) {
+      problems.push(`${at}.buildingId must be a positive integer`);
+    } else {
+      const building = index.buildingById.get(entry.buildingId);
+      if (building === undefined) {
+        // A builder assigned to a building that is not in the save would make
+        // completion lookups fail forever — the builder could never be freed.
+        problems.push(`${at}.buildingId must reference a building in the save`);
+      } else {
+        const upgrade = building.upgrade;
+        if (!isRecord(upgrade)) {
+          problems.push(`${at}.buildingId ${entry.buildingId} has no upgrade in flight`);
+        } else {
+          if (entry.toLevel !== upgrade.toLevel) {
+            problems.push(`${at}.toLevel does not match its building's upgrade`);
+          }
+          if (entry.finishAt !== upgrade.finishAt) {
+            problems.push(`${at}.finishAt does not match its building's upgrade`);
+          }
+        }
+        const list = assigned.get(entry.buildingId) ?? [];
+        list.push(at);
+        assigned.set(entry.buildingId, list);
+      }
+    }
+
+    if (!isPositiveInteger(entry.toLevel)) {
+      problems.push(`${at}.toLevel must be a positive integer`);
+    }
+    if (!isNonNegativeInteger(entry.finishAt)) {
+      problems.push(`${at}.finishAt must be a non-negative integer timestamp`);
+    }
+  });
+
+  for (const [id, building] of index.buildingById) {
+    if (!isRecord(building.upgrade)) continue;
+    const jobs = assigned.get(id) ?? [];
+    if (jobs.length === 0) {
+      problems.push(`building ${id} has an upgrade in flight but no builder assigned`);
+    } else if (jobs.length > 1) {
+      problems.push(`building ${id} has ${jobs.length} builders assigned`);
+    }
+  }
+}
+
+function validateTrainingQueues(
+  raw: unknown,
+  config: GameConfig,
+  index: EntityIndex,
+  problems: string[],
+): void {
+  if (!Array.isArray(raw)) {
+    problems.push('state.trainingQueues must be an array');
+    return;
+  }
+
+  raw.forEach((queue: unknown, position: number) => {
+    const at = `state.trainingQueues[${position}]`;
+    if (!isRecord(queue)) {
+      problems.push(`${at} is not an object`);
+      return;
+    }
+
+    if (!isPositiveInteger(queue.barracksId)) {
+      problems.push(`${at}.barracksId must be a positive integer`);
+    } else {
+      const building = index.buildingById.get(queue.barracksId);
+      if (building === undefined) {
+        problems.push(`${at}.barracksId must reference a building in the save`);
+      } else {
+        const def = config.buildings.find((candidate) => candidate.id === building.type);
+        const level = def?.levels.find((candidate) => candidate.level === building.level);
+        if (level?.queueSlots === undefined) {
+          problems.push(`${at}.barracksId ${queue.barracksId} is not a barracks`);
+        }
+      }
+    }
+
+    if (!Array.isArray(queue.items)) {
+      problems.push(`${at}.items must be an array`);
+      return;
+    }
+    queue.items.forEach((item: unknown, slot: number) => {
+      const itemAt = `${at}.items[${slot}]`;
+      if (!isRecord(item)) {
+        problems.push(`${itemAt} is not an object`);
+        return;
+      }
+      if (typeof item.troopId !== 'string' || item.troopId.length === 0) {
+        problems.push(`${itemAt}.troopId must be a non-empty string`);
+      }
+      if (!isNonNegativeInteger(item.finishAt)) {
+        problems.push(`${itemAt}.finishAt must be a non-negative integer timestamp`);
+      }
+    });
+  });
+}
+
+function validateResearch(raw: unknown, problems: string[]): void {
+  if (!isRecord(raw)) {
+    problems.push('state.research must be an object');
+    return;
+  }
+
+  if (!isRecord(raw.levels)) {
+    problems.push('state.research.levels must be an object');
+  } else {
+    for (const [unitId, level] of Object.entries(raw.levels)) {
+      if (unitId.length === 0) problems.push('state.research.levels has an empty identifier');
+      if (!isNonNegativeInteger(level)) {
+        problems.push(`state.research.levels.${unitId} must be a non-negative integer`);
+      }
+    }
+  }
+
+  if (raw.active !== undefined) {
+    if (!isRecord(raw.active)) {
+      problems.push('state.research.active must be an object when present');
+      return;
+    }
+    if (typeof raw.active.unitId !== 'string' || raw.active.unitId.length === 0) {
+      problems.push('state.research.active.unitId must be a non-empty string');
+    }
+    if (!isPositiveInteger(raw.active.toLevel)) {
+      problems.push('state.research.active.toLevel must be a positive integer');
+    }
+    if (!isNonNegativeInteger(raw.active.finishAt)) {
+      problems.push('state.research.active.finishAt must be a non-negative integer timestamp');
+    }
+  }
 }
 
 export type EnvelopeCheck = { ok: true; save: VillageSave } | { ok: false; problem: SaveProblem };

@@ -241,7 +241,7 @@ describe('persisted state validation', () => {
   it('rejects buildings outside the grid, with unknown types, or duplicated ids', () => {
     const outside = structuredCopy(state);
     outside.buildings[0]!.x = 999;
-    expect(validatePersistedState(outside, GAME_CONFIG).join()).toContain('tile column');
+    expect(validatePersistedState(outside, GAME_CONFIG).join()).toContain('buildable core');
 
     const unknownType = structuredCopy(state);
     unknownType.buildings[0]!.type = 'dragon_roost';
@@ -300,6 +300,320 @@ describe('persisted state validation', () => {
     const keep = broken.buildings.find((building) => building.type === 'keep');
     keep!.level = 4;
     expect(validatePersistedState(broken, GAME_CONFIG).join()).toContain('keepLevel');
+  });
+
+  it('rejects a state written against another sim schema version', () => {
+    // Schema v1 is the first supported format, so "older" is not a thing yet:
+    // both a future version and garbage are simply unsupported.
+    for (const version of [0, 2, '1', null, undefined]) {
+      const broken = structuredCopy(state) as unknown as Record<string, unknown>;
+      broken.version = version;
+      expect(
+        validatePersistedState(broken, GAME_CONFIG).join(),
+        `version ${String(version)}`,
+      ).toContain('state.version');
+    }
+  });
+
+  it('rejects every missing top-level field', () => {
+    const fields = [
+      'version',
+      'configVersion',
+      'keepLevel',
+      'resources',
+      'builders',
+      'buildings',
+      'obstacles',
+      'army',
+      'trainingQueues',
+      'research',
+      'spells',
+      'trophies',
+      'tutorialStep',
+      'lastSyncAt',
+    ];
+
+    for (const field of fields) {
+      const broken = structuredCopy(state) as unknown as Record<string, unknown>;
+      delete broken[field];
+      const problems = validatePersistedState(broken, GAME_CONFIG).join('; ');
+      expect(problems, `missing ${field}`).toContain(`state.${field}`);
+    }
+  });
+
+  it('rejects malformed army and spell counts', () => {
+    const fractional = structuredCopy(state);
+    fractional.army = { barbarian: 1.5 };
+    expect(validatePersistedState(fractional, GAME_CONFIG).join()).toContain(
+      'state.army.barbarian',
+    );
+
+    const negative = structuredCopy(state);
+    negative.spells = { rage: -1 };
+    expect(validatePersistedState(negative, GAME_CONFIG).join()).toContain('state.spells.rage');
+
+    const notAnObject = structuredCopy(state) as unknown as { army: unknown };
+    notAnObject.army = ['barbarian'];
+    expect(validatePersistedState(notAnObject, GAME_CONFIG).join()).toContain(
+      'state.army must be an object',
+    );
+  });
+
+  it('rejects training queues without a real barracks behind them', () => {
+    const dangling = structuredCopy(state);
+    dangling.trainingQueues = [{ barracksId: 9999, items: [] }];
+    expect(validatePersistedState(dangling, GAME_CONFIG).join()).toContain(
+      'must reference a building',
+    );
+
+    // No barracks exists in this config yet, so even a real building is not a
+    // legal queue owner — the validator must follow the config, not the shape.
+    const notBarracks = structuredCopy(state);
+    const keep = notBarracks.buildings.find((building) => building.type === 'keep')!;
+    notBarracks.trainingQueues = [{ barracksId: keep.id, items: [] }];
+    expect(validatePersistedState(notBarracks, GAME_CONFIG).join()).toContain('is not a barracks');
+
+    const malformed = structuredCopy(state);
+    malformed.trainingQueues = [
+      {
+        barracksId: keep.id,
+        // Deliberately the wrong shape for items.
+        items: [{ troopId: '', finishAt: -1 }],
+      },
+    ] as unknown as PlayerState['trainingQueues'];
+    const problems = validatePersistedState(malformed, GAME_CONFIG).join('; ');
+    expect(problems).toContain('items[0].troopId');
+    expect(problems).toContain('items[0].finishAt');
+
+    const notAnArray = structuredCopy(state) as unknown as { trainingQueues: unknown };
+    notAnArray.trainingQueues = { barracksId: keep.id, items: [] };
+    expect(validatePersistedState(notAnArray, GAME_CONFIG).join()).toContain(
+      'state.trainingQueues must be an array',
+    );
+  });
+
+  it('rejects malformed research levels and active metadata', () => {
+    const negativeLevel = structuredCopy(state);
+    negativeLevel.research.levels = { barbarian: -1 };
+    expect(validatePersistedState(negativeLevel, GAME_CONFIG).join()).toContain(
+      'state.research.levels.barbarian',
+    );
+
+    const active = structuredCopy(state);
+    active.research.active = { unitId: '', toLevel: 0, finishAt: -5 };
+    const problems = validatePersistedState(active, GAME_CONFIG).join('; ');
+    expect(problems).toContain('active.unitId');
+    expect(problems).toContain('active.toLevel');
+    expect(problems).toContain('active.finishAt');
+
+    const notAnObject = structuredCopy(state) as unknown as { research: unknown };
+    notAnObject.research = { levels: [] };
+    expect(validatePersistedState(notAnObject, GAME_CONFIG).join()).toContain(
+      'state.research.levels must be an object',
+    );
+
+    // An empty research record is the honest shape for a village that has not
+    // researched anything yet, and must stay valid.
+    const none = structuredCopy(state);
+    none.research = { levels: {} };
+    expect(validatePersistedState(none, GAME_CONFIG)).toEqual([]);
+  });
+
+  it('rejects impossible trophy and tutorial counters', () => {
+    const trophies = structuredCopy(state) as unknown as { trophies: unknown };
+    trophies.trophies = -1;
+    expect(validatePersistedState(trophies, GAME_CONFIG).join()).toContain('state.trophies');
+
+    const tutorial = structuredCopy(state) as unknown as { tutorialStep: unknown };
+    tutorial.tutorialStep = 1.5;
+    expect(validatePersistedState(tutorial, GAME_CONFIG).join()).toContain('state.tutorialStep');
+
+    const keep = structuredCopy(state) as unknown as { keepLevel: unknown };
+    keep.keepLevel = 99;
+    expect(validatePersistedState(keep, GAME_CONFIG).join()).toContain(
+      'exceeds the configured maximum',
+    );
+  });
+
+  it('rejects malformed optional timestamps and clan data', () => {
+    const shield = structuredCopy(state) as unknown as { shieldUntil: unknown };
+    shield.shieldUntil = -1;
+    expect(validatePersistedState(shield, GAME_CONFIG).join()).toContain('state.shieldUntil');
+
+    const guard = structuredCopy(state) as unknown as { guardUntil: unknown };
+    guard.guardUntil = 'soon';
+    expect(validatePersistedState(guard, GAME_CONFIG).join()).toContain('state.guardUntil');
+
+    const clan = structuredCopy(state) as unknown as { clan: unknown };
+    clan.clan = [];
+    expect(validatePersistedState(clan, GAME_CONFIG).join()).toContain(
+      'state.clan must be an object',
+    );
+
+    const emptyClan = structuredCopy(state) as unknown as { clan: unknown };
+    emptyClan.clan = { clanId: '', role: '' };
+    const problems = validatePersistedState(emptyClan, GAME_CONFIG).join('; ');
+    expect(problems).toContain('state.clan.clanId');
+    expect(problems).toContain('state.clan.role');
+
+    // Valid optional data is accepted.
+    const withClan = structuredCopy(state);
+    withClan.shieldUntil = START + 1000;
+    withClan.clan = { clanId: 'emberwatch', role: 'member' };
+    expect(validatePersistedState(withClan, GAME_CONFIG)).toEqual([]);
+  });
+
+  it('rejects building levels and upgrade targets the config cannot produce', () => {
+    const tooHigh = structuredCopy(state);
+    tooHigh.buildings[0]!.level = 99;
+    expect(validatePersistedState(tooHigh, GAME_CONFIG).join()).toContain('maximum');
+
+    const skipsALevel = structuredCopy(state);
+    skipsALevel.buildings[0]!.upgrade = { toLevel: 3, finishAt: START + 1000 };
+    expect(validatePersistedState(skipsALevel, GAME_CONFIG).join()).toContain(
+      'is not one level above',
+    );
+
+    const unconfigured = structuredCopy(state);
+    unconfigured.buildings[0]!.level = 0;
+    unconfigured.buildings[0]!.upgrade = { toLevel: 9, finishAt: START + 1000 };
+    expect(validatePersistedState(unconfigured, GAME_CONFIG).join()).toContain(
+      'is not a configured level',
+    );
+
+    const orphaned = structuredCopy(state);
+    orphaned.buildings[0]!.level = 0;
+    delete orphaned.buildings[0]!.upgrade;
+    expect(validatePersistedState(orphaned, GAME_CONFIG).join()).toContain(
+      'level 0 but has no upgrade',
+    );
+
+    const badTimer = structuredCopy(state);
+    badTimer.buildings[0]!.upgrade = { toLevel: 2, finishAt: -1 };
+    expect(validatePersistedState(badTimer, GAME_CONFIG).join()).toContain('upgrade.finishAt');
+  });
+
+  it('rejects builder assignments that disagree with the upgrade they mirror', () => {
+    // The fixture already has a level-0 construction in flight (the placed Gold
+    // Mine), so this adds a *second* conversion of the Keep and keeps both
+    // assignments — replacing the array would test an orphan, not a mismatch.
+    const upgrading = structuredCopy(state);
+    const keep = upgrading.buildings.find((building) => building.type === 'keep')!;
+    const finishAt = START + 60_000;
+    keep.upgrade = { toLevel: 2, finishAt };
+    upgrading.builders.busy.push({ buildingId: keep.id, toLevel: 2, finishAt });
+    const assignmentFor = (candidate: PlayerState): { toLevel: number; finishAt: number } =>
+      candidate.builders.busy.find((busy) => busy.buildingId === keep.id)!;
+
+    // The baseline is a coherent construction site.
+    expect(validatePersistedState(upgrading, GAME_CONFIG)).toEqual([]);
+
+    const wrongLevel = structuredCopy(upgrading);
+    assignmentFor(wrongLevel).toLevel = 3;
+    expect(validatePersistedState(wrongLevel, GAME_CONFIG).join()).toContain(
+      "toLevel does not match its building's upgrade",
+    );
+
+    const wrongTimer = structuredCopy(upgrading);
+    assignmentFor(wrongTimer).finishAt = finishAt + 1;
+    expect(validatePersistedState(wrongTimer, GAME_CONFIG).join()).toContain(
+      "finishAt does not match its building's upgrade",
+    );
+
+    const unassigned = structuredCopy(upgrading);
+    unassigned.builders.busy = unassigned.builders.busy.filter(
+      (busy) => busy.buildingId !== keep.id,
+    );
+    expect(validatePersistedState(unassigned, GAME_CONFIG).join()).toContain(
+      `building ${keep.id} has an upgrade in flight but no builder assigned`,
+    );
+
+    const shorthanded = structuredCopy(upgrading);
+    shorthanded.builders.busy.push({ ...assignmentFor(shorthanded), buildingId: keep.id });
+    expect(validatePersistedState(shorthanded, GAME_CONFIG).join()).toContain(
+      '2 builders assigned',
+    );
+
+    const impossibleCount = structuredCopy(state);
+    impossibleCount.builders.count = 6;
+    expect(validatePersistedState(impossibleCount, GAME_CONFIG).join()).toContain(
+      'exceeds the maximum 5',
+    );
+  });
+
+  it('rejects buffers on buildings that do not produce, or that break the level invariants', () => {
+    const onTheKeep = structuredCopy(state);
+    const keep = onTheKeep.buildings.find((building) => building.type === 'keep')!;
+    keep.buffer = { amount: 1, remainder: 0, lastAccruedAt: START };
+    expect(validatePersistedState(onTheKeep, GAME_CONFIG).join()).toContain(
+      'does not produce at this level',
+    );
+
+    const producing = catchUpTo(
+      catchUpTo(withGoldMine(freshState()), START + 20_000),
+      START + 30_000,
+    );
+    const stored = structuredCopy(producing);
+    const mine = stored.buildings.find(
+      (building) => building.type === 'gold_mine' && building.x === 24,
+    )!;
+    expect(mine.buffer).toBeDefined();
+
+    const overCap = structuredCopy(stored);
+    overCap.buildings.find((building) => building.id === mine.id)!.buffer!.amount = 10_000_000;
+    expect(validatePersistedState(overCap, GAME_CONFIG).join()).toContain(
+      'exceeds the configured cap',
+    );
+
+    const aheadOfSync = structuredCopy(stored);
+    aheadOfSync.buildings.find((building) => building.id === mine.id)!.buffer!.lastAccruedAt =
+      stored.lastSyncAt + 1;
+    expect(validatePersistedState(aheadOfSync, GAME_CONFIG).join()).toContain(
+      'ahead of state.lastSyncAt',
+    );
+
+    const notAnObject = structuredCopy(stored);
+    notAnObject.buildings.find((building) => building.id === mine.id)!.buffer =
+      'gold' as unknown as PlayerState['buildings'][number]['buffer'];
+    expect(validatePersistedState(notAnObject, GAME_CONFIG).join()).toContain(
+      'buffer must be an object',
+    );
+  });
+
+  it('rejects entities that overlap each other', () => {
+    const overlapping = structuredCopy(state);
+    const mine = overlapping.buildings[0]!;
+    overlapping.buildings.push({ ...mine, id: 9001 });
+    expect(validatePersistedState(overlapping, GAME_CONFIG).join()).toContain('overlaps');
+
+    const obstacleOnBuilding = structuredCopy(state);
+    const keep = obstacleOnBuilding.buildings.find((building) => building.type === 'keep')!;
+    obstacleOnBuilding.obstacles.push({
+      id: 9002,
+      type: 'tree',
+      x: keep.x,
+      y: keep.y,
+    });
+    expect(validatePersistedState(obstacleOnBuilding, GAME_CONFIG).join()).toContain('overlaps');
+  });
+
+  it('applies the real placement rules: obstacles may sit in the margin, buildings may not', () => {
+    const margin = structuredCopy(state);
+    margin.obstacles[0]!.x = 1;
+    margin.obstacles[0]!.y = 1;
+    expect(validatePersistedState(margin, GAME_CONFIG)).toEqual([]);
+
+    const offMap = structuredCopy(state);
+    offMap.obstacles[0]!.x = 999;
+    expect(validatePersistedState(offMap, GAME_CONFIG).join()).toContain('leaves the 48×48 map');
+
+    const unknownObstacle = structuredCopy(state);
+    unknownObstacle.obstacles[0]!.type = 'dragon';
+    expect(validatePersistedState(unknownObstacle, GAME_CONFIG).join()).toContain('not defined');
+
+    const reusedId = structuredCopy(state);
+    reusedId.obstacles[0]!.id = reusedId.buildings[0]!.id;
+    expect(validatePersistedState(reusedId, GAME_CONFIG).join()).toContain('is already used');
   });
 });
 

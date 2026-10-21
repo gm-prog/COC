@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { GAME_CONFIG } from '@coc/game-data';
 import { applyCommand, catchUp, createNewPlayerState, type PlayerState } from '@coc/sim-core';
-import { bootstrapVillage, unsavedVillage } from '../../src/persistence/bootstrap';
+import { Hud, saveIndicatorForProblem } from '../../src/hud';
+import {
+  bootstrapVillage,
+  unsavedVillage,
+  type VillageBootstrap,
+} from '../../src/persistence/bootstrap';
 import {
   SaveStorageError,
   createSave,
+  loadVillage,
   type VillageSave,
   type VillageStorage,
 } from '../../src/persistence/villageSave';
@@ -34,6 +40,32 @@ class MemoryStorage implements VillageStorage {
     this.writes += 1;
     this.record = structuredClone(save);
   }
+}
+
+/** The same indicator decision `BootScene` makes at startup. */
+function renderSaveIndicator(village: VillageBootstrap): {
+  textContent: string;
+  hidden: boolean;
+  state: string | undefined;
+} {
+  const node = {
+    dataset: {} as Record<string, string>,
+    hidden: true,
+    textContent: '',
+  };
+  const root = {
+    addEventListener(): void {},
+    removeEventListener(): void {},
+    querySelector: (selector: string) => (selector === '#save-status' ? node : null),
+  } as unknown as HTMLElement;
+
+  const hud = new Hud(root);
+  hud.setSaveIndicator(
+    village.problem === null ? 'idle' : saveIndicatorForProblem(village.problem.code),
+  );
+  hud.dispose();
+
+  return { textContent: node.textContent, hidden: node.hidden, state: node.dataset.saveState };
 }
 
 function placeGoldMine(state: PlayerState, now = START): PlayerState {
@@ -320,5 +352,37 @@ describe('unsavedVillage', () => {
     expect(village.source).toBe('unsaved');
     expect(village.state.resources.gold).toBe(1000);
     expect(village.problem?.code).toBe('storage_unavailable');
+  });
+});
+
+describe('deep state validation in the load path', () => {
+  it('rejects a structurally complete but impossible village without touching the record', async () => {
+    const impossible = placeGoldMine(createNewPlayerState(GAME_CONFIG, START));
+    // Correct shape, impossible content: a research level no rule can produce.
+    impossible.research = { levels: { barbarian: -3 } } as PlayerState['research'];
+    const record = createSave(impossible, GAME_CONFIG.version, START);
+    const storage = new MemoryStorage(record);
+
+    const loaded = await loadVillage(storage, GAME_CONFIG);
+    expect(loaded.status).toBe('unreadable');
+    if (loaded.status !== 'unreadable') return;
+    expect(loaded.problem.code).toBe('malformed');
+    expect(loaded.problem.message).toContain('state.research.levels.barbarian');
+
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START,
+      storage,
+      debounceMs: 0,
+    });
+
+    expect(village.source).toBe('unsaved');
+    expect(village.autosave).toBeNull();
+    // Malformed, not "storage unavailable": the player must be told the record
+    // is unreadable rather than that saving is impossible.
+    expect(village.problem?.code).toBe('malformed');
+    expect(storage.record).toEqual(record);
+    expect(storage.writes).toBe(0);
+    expect(renderSaveIndicator(village).state).toBe('unreadable');
   });
 });
