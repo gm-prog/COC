@@ -83,9 +83,27 @@ export async function bootstrapVillage(options: BootstrapOptions): Promise<Villa
 
   if (loaded.status === 'loaded') {
     const restored = restoreVillage(loaded.save, config, now());
+
+    if (restored.clockWentBackwards) {
+      // The device clock is behind the saved village's watermark, so `catchUp`
+      // refused to run. Saving must stay off for this session: the in-memory
+      // village has not been reconciled, and writing it back would replace a
+      // good record with one stamped from a clock we know is wrong. The
+      // original record is left exactly as it is until the clock catches up.
+      return {
+        state: restored.state,
+        autosave: null,
+        source: 'restored',
+        events: [],
+        reconciled: false,
+        problem: {
+          code: 'clock_behind',
+          message: `device clock is before the saved village's lastSyncAt (${restored.state.lastSyncAt})`,
+        },
+      };
+    }
+
     return {
-      // A clock behind the save means `catchUp` refused to run; the saved state
-      // is still the best available village, so keep it and save onwards.
       state: restored.state,
       autosave: createAutosave(storage, options),
       source: 'restored',

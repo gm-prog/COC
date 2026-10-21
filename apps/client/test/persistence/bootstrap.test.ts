@@ -527,3 +527,92 @@ describe('deep state validation in the load path', () => {
     expect(renderSaveIndicator(village).state).toBe('unreadable');
   });
 });
+
+describe('device clock skew', () => {
+  const saved = catchUpTo(placeGoldMine(createNewPlayerState(GAME_CONFIG, START)), START + 5_000);
+  const record = createSave(saved, GAME_CONFIG.version, saved.lastSyncAt);
+
+  it('keeps the saved village, leaves the record alone, and switches saving off', async () => {
+    const storage = new MemoryStorage(record);
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => saved.lastSyncAt - 60_000,
+      storage,
+      debounceMs: 0,
+    });
+
+    expect(village.source).toBe('restored');
+    expect(village.autosave).toBeNull();
+    expect(village.problem?.code).toBe('clock_behind');
+    // Nothing was replayed, and nothing may claim it was.
+    expect(village.reconciled).toBe(false);
+    expect(village.events).toEqual([]);
+
+    // The saved village is shown exactly as stored: no timer resets and no
+    // fabricated timestamp to sneak past the monotonic rule.
+    expect(village.state).toEqual(saved);
+    expect(village.state.lastSyncAt).toBe(saved.lastSyncAt);
+
+    expect(storage.record).toEqual(record);
+    expect(storage.writes).toBe(0);
+
+    // Even an explicit change cannot reach the store: there is no autosave.
+    village.state.resources.gold = 1;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(storage.writes).toBe(0);
+    expect(storage.record).toEqual(record);
+  });
+
+  it('warns accessibly instead of presenting saving as healthy', async () => {
+    const storage = new MemoryStorage(record);
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => saved.lastSyncAt - 1,
+      storage,
+      debounceMs: 0,
+    });
+
+    const indicator = renderSaveIndicator(village);
+    expect(indicator.hidden).toBe(false);
+    expect(indicator.state).toBe('clock_behind');
+    expect(indicator.textContent).toBe(t('save.clockBehind'));
+    expect(indicator.textContent.toLowerCase()).toContain('clock is behind');
+    expect(indicator.textContent.toLowerCase()).toContain('saving is off');
+    // The healthy states stay hidden/reassuring only when saving really works.
+    expect(indicator.textContent).not.toBe(t('save.saved'));
+  });
+
+  it('starts saving normally once the timestamps are valid again', async () => {
+    const storage = new MemoryStorage(record);
+
+    const behind = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => saved.lastSyncAt - 1,
+      storage,
+      debounceMs: 0,
+    });
+    expect(behind.autosave).toBeNull();
+    expect(storage.record).toEqual(record);
+
+    const validAt = saved.lastSyncAt + 60_000;
+    const ahead = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => validAt,
+      storage,
+      debounceMs: 0,
+    });
+
+    expect(ahead.source).toBe('restored');
+    expect(ahead.problem).toBeNull();
+    expect(ahead.autosave).not.toBeNull();
+    expect(ahead.reconciled).toBe(true);
+    expect(ahead.state.lastSyncAt).toBe(validAt);
+
+    ahead.autosave?.schedule(ahead.state);
+    await ahead.autosave?.flush();
+
+    expect(storage.writes).toBe(1);
+    expect((storage.record as VillageSave).state.lastSyncAt).toBe(validAt);
+    ahead.autosave?.dispose();
+  });
+});

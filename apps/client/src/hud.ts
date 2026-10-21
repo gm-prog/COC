@@ -19,7 +19,8 @@ export type SaveIndicator =
   | SaveStatus
   | 'unavailable'
   | 'unreadable'
-  | 'incompatible';
+  | 'incompatible'
+  | 'clock_behind';
 
 /** Translation key for each indicator state. */
 const SAVE_INDICATOR_KEYS: Record<SaveIndicator, TranslationKey> = {
@@ -30,6 +31,7 @@ const SAVE_INDICATOR_KEYS: Record<SaveIndicator, TranslationKey> = {
   unavailable: 'save.unavailable',
   unreadable: 'save.unreadable',
   incompatible: 'save.incompatible',
+  clock_behind: 'save.clockBehind',
 };
 
 /**
@@ -47,6 +49,8 @@ export function saveIndicatorForProblem(problem: SaveProblemCode): SaveIndicator
     case 'malformed':
     case 'unsupported_schema':
       return 'unreadable';
+    case 'clock_behind':
+      return 'clock_behind';
   }
 }
 

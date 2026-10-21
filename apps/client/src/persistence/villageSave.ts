@@ -89,7 +89,14 @@ export type SaveProblemCode =
   /** The record declares a schema version this build cannot read. */
   | 'unsupported_schema'
   /** The record was written against a different game-data config. */
-  | 'incompatible_config';
+  | 'incompatible_config'
+  /**
+   * The device clock is behind the saved village's `lastSyncAt`, so the
+   * simulation refuses to move time backwards. Not a property of the record —
+   * the record is fine — but it disables saving for this session, which is
+   * exactly what `problem` communicates to the scene.
+   */
+  | 'clock_behind';
 
 export interface SaveProblem {
   code: SaveProblemCode;
