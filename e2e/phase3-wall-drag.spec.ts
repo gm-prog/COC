@@ -155,13 +155,27 @@ async function storedRevision(page: Page): Promise<number> {
 }
 
 /**
+ * Waits until a commit newer than `previous` is in IndexedDB.
+ *
+ * `expect.poll` runs its interval in Node, so it keeps retrying while the
+ * page's clock is paused; a web-first assertion would be waiting for animation
+ * frames that the paused clock never runs, and a save that landed a moment late
+ * would hang the test instead of retrying.
+ */
+async function waitForRevisionAfter(page: Page, previous: number): Promise<number> {
+  await expect.poll(() => storedRevision(page), { timeout: 20_000 }).toBeGreaterThan(previous);
+  return storedRevision(page);
+}
+
+/**
  * Boots a fresh page, waits for the starter's first committed save, then
  * replaces the record with a Keep 2 fixture and reloads.
  *
  * Writing a valid record and reloading is the only way in: the app restores it
  * through `bootstrapVillage`, validates it exactly as it validates a player's
  * own save, and never learns that it came from a test. An invalid fixture would
- * surface as `data-save-state="unreadable"`, which the assertions below catch.
+ * restore as an unreadable save, and the gold/capacity assertions below would
+ * fail loudly instead of the drag quietly testing the wrong village.
  */
 async function loadKeepTwoVillage(page: Page): Promise<void> {
   await page.goto('/');
@@ -171,7 +185,7 @@ async function loadKeepTwoVillage(page: Page): Promise<void> {
   // The starter is persisted immediately on first boot; wait for the commit, so
   // the overwrite below cannot race a pending write.
   await page.clock.runFor(SAVE_DEBOUNCE_MS);
-  await expect(page.getByTestId('save-status')).toHaveAttribute('data-save-state', 'saved');
+  await waitForRevisionAfter(page, 0);
 
   const now = await page.evaluate(() => Date.now());
   const save = keepTwoSave(now);
@@ -210,7 +224,7 @@ test('walls stay locked at Keep 1, and a drag cannot sneak one in', async ({ pag
   await freezeClock(page);
 
   await page.clock.runFor(SAVE_DEBOUNCE_MS);
-  await expect(page.getByTestId('save-status')).toHaveAttribute('data-save-state', 'saved');
+  await waitForRevisionAfter(page, 0);
   const revisionBefore = await storedRevision(page);
 
   // 1. The shop still refuses Wall at Keep 1, with the configured reason.
@@ -246,6 +260,7 @@ test('a wall line is dragged, saved and restored; mode stays open', async ({ pag
 
   await page.clock.install({ time: START_TIME });
   await loadKeepTwoVillage(page);
+  const revisionAtLoad = await storedRevision(page);
 
   // 1. Wall is available at Keep 2, and choosing it opens the drag banner.
   const { choose } = await openWallCard(page);
@@ -285,6 +300,7 @@ test('a wall line is dragged, saved and restored; mode stays open', async ({ pag
 
   // 5. Builders finish, and a second stroke needs no trip back to the shop.
   await page.clock.runFor(WALL_FINISH_MS);
+  await settle(page);
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
   await dragTiles(page, SECOND_STROKE);
 
@@ -295,9 +311,10 @@ test('a wall line is dragged, saved and restored; mode stays open', async ({ pag
 
   // 6. Let both walls finish, wait for the write to commit, then reload.
   await page.clock.runFor(WALL_FINISH_MS);
+  await settle(page);
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
   await page.clock.runFor(SAVE_DEBOUNCE_MS);
-  await expect(page.getByTestId('save-status')).toHaveAttribute('data-save-state', 'saved');
+  await waitForRevisionAfter(page, revisionAtLoad);
 
   await page.reload();
   await expect(page.locator('#game canvas')).toBeVisible();
@@ -380,10 +397,13 @@ test('cancel, a blocked tile and a duplicate crossing all behave honestly', asyn
   await expect(page.getByTestId('hint')).toHaveText(
     'Placed 2 wall segments, then stopped: that tile is already taken.',
   );
+  await page.clock.runFor(SAVE_DEBOUNCE_MS);
+  const revisionAfterRock = await waitForRevisionAfter(page, revisionBefore);
 
   // Free the builder, then cross the same two tiles repeatedly: one wall each,
   // one charge each.
   await page.clock.runFor(WALL_FINISH_MS);
+  await settle(page);
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
   await dragTiles(page, [
     { x: 14, y: 30 },
@@ -397,8 +417,9 @@ test('cancel, a blocked tile and a duplicate crossing all behave honestly', asyn
   // 4. All of it survives a reload: the prefix wall, the two crossed tiles, and
   //    the rock that stopped the stroke.
   await page.clock.runFor(WALL_FINISH_MS);
+  await settle(page);
   await page.clock.runFor(SAVE_DEBOUNCE_MS);
-  await expect(page.getByTestId('save-status')).toHaveAttribute('data-save-state', 'saved');
+  await waitForRevisionAfter(page, revisionAfterRock);
 
   await page.reload();
   await expect(page.locator('#game canvas')).toBeVisible();
