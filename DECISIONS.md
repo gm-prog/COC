@@ -460,9 +460,14 @@ without an exclusion list that could rot.
 
 **Clock instead of sleeps.** `page.clock.install()` is called before `page.goto()`, because the
 scene seeds its economy from `Date.now()` inside `create()`. After `install` the clock still
-flows in real time (so Phaser animates and input is dispatched normally); `runFor(ms)` then
-jumps it forward, firing every timer _and_ animation frame on the way, which is what makes the
-scene's one-second `catchUp` tick and the 20 s build both elapse. Between jumps the test calls
+flows in real time (so Phaser animates and input is dispatched normally); the test then jumps it
+forward instead of waiting. A jump is `fastForward(ms)` plus a little over a second of
+`runFor`: the economy accrues from timestamps — `catchUp` walks completions in chronological
+order and carries the fractional production remainder exactly — so one catch-up spanning a
+minute yields precisely the state sixty one-second catch-ups would, while painting every frame
+of that minute costs thousands of software-rendered frames (the first CI run timed out doing
+exactly that). The `runFor` tail carries the scene's one-second HUD tick past its threshold,
+which is what repaints the panel from the caught-up state. Between jumps the test calls
 `pauseAt()` to pin the clock, so the resource numbers asserted afterwards are exact rather than
 "about four" — without it, however long an assertion takes becomes extra production time.
 
