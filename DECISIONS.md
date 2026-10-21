@@ -706,3 +706,46 @@ directly for the commit, so the read-only gate cannot be forgotten by a future c
 imports `applyCommand` because a prediction must not depend on whether saving is on. And the
 selection panel stays open during a move: it carries the building's details and its original
 coordinates, which is the reference point the player is moving _from_.
+
+## D39 · 2026-10-22 · A wall line is a stroke of unchanged `PlaceBuilding` commands
+
+**The line is gestures, not a new command.** The simulation places one 1×1 wall at a time and every
+wall is a real construction (D27): 10 Gold, 5 s and one busy builder. Adding a `PlaceWallLine`
+command would have put a second placement rulebook in the protocol and let a line skip the
+per-segment checks. Instead `villageWallPlacement.ts` is a pure planner over the existing command:
+`extendWallPath` builds the tile path, `planWallStroke` replays it through `applyCommand` on a
+rolling copy and stops at the first refusal. The preview and the commit call the same function, so
+the green cells are exactly what the release will build — the same "the preview _is_ the command"
+reasoning as D38, one level up.
+
+**Why the path needs its own rules.** Sampled pointer positions are not a line. A fast drag can jump
+several tiles, so `extendWallPath` fills every cell between two samples; the same tile can be
+crossed twice, so repeats are dropped (one charge, one wall); and consecutive cells must share an
+edge, so a diagonal delta inserts the connector cell chosen by a fixed tie-break (the horizontal
+step first). All three are deterministic, which is what lets the unit tests assert that equivalent
+gestures produce the same path. A diagonal drag therefore lays a staircase rather than a hole.
+
+**Wall mode owns the primary pointer, and Cancel is the way back to panning.** In wall mode a
+one-pointer primary drag grows the stroke and never pans; wheel and pinch still zoom, and every
+other mode keeps its gestures untouched. Offering two meanings for one drag was rejected as
+ambiguous: the mode statement says "Cancel first to pan by dragging", and the Cancel button is
+visible the whole time. A second pointer, `pointercancel`, `pointerupoutside` (a release off the
+canvas) and a read-only transition **discard** the draft rather than committing a gesture the player
+did not clearly finish; the remaining finger lifting can never place a half-seen line.
+
+**Release re-plans, saves once, and keeps the mode open.** The plan is recomputed at release rather
+than reused from the last pointer move, because the village can change during a drag (a builder may
+finish, the clock advances). Each accepted segment carries its own envelope id and the rolling draft
+is adopted only after the prefix is known, so a partial line is one state and one autosave. Zero
+accepted segments leave state, events and save untouched. A read-only session refuses the plan,
+drops the draft and closes the mode with the existing hint, because the walls could never be saved.
+
+**The builder cap is reported, not worked around.** Two builders mean at most two walls per stroke;
+the suite drags four tiles and asserts the accepted prefix plus `all builders are busy`. Batching,
+free walls or a queue would each be a balance change, and the rules are the authority.
+
+**Keep 2 is a fixture, not a shortcut.** Walls stay locked at Keep 1 with the configured "Keep 2
+required" reason, and scenario A proves a drag cannot sneak one in. The Keep 2 journey seeds a valid
+schema-v2 record and lets the app restore it through the ordinary boot path; the record is checked
+by the same envelope and state validators in a unit test. It is a test fixture, not proof that a
+player can reach Keep 2 — Gate C item 18 stays open.

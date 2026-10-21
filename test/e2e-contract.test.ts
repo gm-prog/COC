@@ -33,6 +33,7 @@ const SPEC_FILES = [
   'e2e/phase3-village.spec.ts',
   'e2e/phase3-move-mode.spec.ts',
   'e2e/phase3-obstacle-removal.spec.ts',
+  'e2e/phase3-wall-drag.spec.ts',
 ];
 
 /** The fixed viewport from `playwright.config.ts`. */
@@ -92,6 +93,42 @@ describe('browser test geometry: tile centres on the canvas', () => {
     expect(point.y).toBeLessThan(VIEWPORT.height - 12);
   });
 
+  /**
+   * The wall suite drags along row y = 26, and probes the camera at (30, 30).
+   *
+   * Those points must be on screen and must not fall inside a panel that takes
+   * clicks back from the canvas: the shop (top-right), the placement banner
+   * (bottom-right) and the selection panel (bottom-left). The village panel is
+   * `pointer-events: none`, so it cannot swallow a drag.
+   */
+  it('keeps the wall-drag row and the camera probe clear of clickable panels', () => {
+    const wallTiles = [
+      { x: 14, y: 26 },
+      { x: 15, y: 26 },
+      { x: 16, y: 26 },
+      { x: 17, y: 26 },
+      { x: 18, y: 26 },
+      { x: 19, y: 26 },
+      { x: 30, y: 30 },
+    ];
+
+    for (const tile of wallTiles) {
+      const point = tileCenterToPage(canvas, tile);
+      expect(point.x).toBeGreaterThan(12);
+      expect(point.x).toBeLessThan(VIEWPORT.width - 12);
+      expect(point.y).toBeGreaterThan(48);
+      expect(point.y).toBeLessThan(VIEWPORT.height - 12);
+
+      const inShop = point.x > 908 && point.y < 700;
+      const inBanner = point.x > 908 && point.y > 640;
+      const inSelectionPanel = point.x < 292 && point.y > 500;
+      expect(
+        inShop || inBanner || inSelectionPanel,
+        `tile ${tile.x},${tile.y} lands on clickable chrome at ${point.x},${point.y}`,
+      ).toBe(false);
+    }
+  });
+
   it('keeps the placement tile and its neighbours on screen', () => {
     // The tile the smoke test clicks, plus the 3×3 footprint it occupies, must
     // be inside the viewport and clear of the HUD panels. The HUD lives at the
@@ -131,6 +168,9 @@ describe('browser test contract: DOM hooks and copy', () => {
     // And the obstacle spec: it is the only one that reads the reward preview.
     expect(specIds).toContain('selection-reward');
     expect(specTestIds).toContain('selection-remove');
+    // And the wall spec: it is the only one that reads the drag instructions.
+    expect(specIds).toContain('placement-feedback');
+    expect(specTestIds).toContain('shop-item-wall');
   });
 
   it('references only ids that exist in index.html', () => {
@@ -205,6 +245,25 @@ describe('browser test contract: DOM hooks and copy', () => {
     ).toBe('Rock cleared: 1 Gems; 30 Gold was lost to storage.');
     expect(t('obstacle.removedNothing', { obstacle: 'Rock', lost: '30 Gold' })).toBe(
       'Rock cleared, but nothing fit in storage — 30 Gold was lost.',
+    );
+    // Drag-to-place walls (e2e/phase3-wall-drag.spec.ts), which draws two
+    // segments at Keep 2 and then meets the two-builder limit.
+    expect(t('shop.requiredKeep', { level: 2 })).toBe('Keep 2 required');
+    expect(t('placement.title', { building: t('building.wall') })).toBe('Place Wall');
+    expect(t('placement.wallInstructions')).toBe(
+      'Drag across tiles to place a wall line, or tap a single tile. Release to build. Cancel first to pan by dragging.',
+    );
+    expect(t('placement.valid')).toBe('Valid spot');
+    expect(t('wall.placed', { count: 2 })).toBe('Placed 2 wall segments.');
+    expect(t('wall.placedOne')).toBe('Placed a wall segment.');
+    expect(t('wall.partial', { count: 2, reason: t('wall.reason.builders') })).toBe(
+      'Placed 2 wall segments, then stopped: all builders are busy.',
+    );
+    expect(t('wall.partialOne', { reason: t('wall.reason.blocked') })).toBe(
+      'Placed a wall segment, then stopped: that tile is already taken.',
+    );
+    expect(t('wall.failed', { reason: t('wall.reason.margin') })).toBe(
+      'No wall placed: that tile is in the decorative margin.',
     );
   });
 });

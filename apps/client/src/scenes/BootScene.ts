@@ -40,6 +40,11 @@ import {
   obstacleRemovalFeedback,
   resolveObstacleRemoval,
 } from '../villageObstacleRemoval';
+import {
+  extendWallPath,
+  planWallStroke,
+  wallStrokeFeedback,
+} from '../villageWallPlacement';
 import { listBuildingShopItems } from '../villageShop';
 import { getBuildingUpgradeSnapshot } from '../villageUpgrade';
 import { readOnlyHintFor, saveIndicatorForProblem } from '../hud';
@@ -65,6 +70,15 @@ const ZOOM_STEP = 1.12;
 
 /** Screen-space size of the whole map at zoom 1 (see `iso.ts`). */
 const WORLD = worldSizeForGrid(GRID.total, TILE_WIDTH, TILE_HEIGHT);
+
+/**
+ * The building type that is placed as a dragged line (spec §7.4, Gate C item 7).
+ *
+ * Named once: every wall-specific branch in this scene is a comparison against
+ * this constant, so a future "place lines" building has one obvious seam rather
+ * than a scattered literal.
+ */
+const WALL_BUILDING_TYPE = 'wall';
 
 const COLORS = {
   backdrop: 0x151c2b,
@@ -148,11 +162,26 @@ export class BootScene extends Phaser.Scene {
     return this.interaction.kind === 'placing' ? this.interaction.buildingType : null;
   }
 
+  /** True while the open placement mode is the dragged wall line. */
+  private get wallPlacement(): boolean {
+    return this.interaction.kind === 'placing' && this.interaction.buildingType === WALL_BUILDING_TYPE;
+  }
+
   /** The move session in progress, if any. Read-only view of `interaction`. */
   private get moveSession(): MoveSession | null {
     return this.interaction.kind === 'moving' ? this.interaction.session : null;
   }
   private transform: CameraTransform = { zoom: 1, panX: 0, panY: 0 };
+
+  /**
+   * The wall stroke being dragged, or `null` when no drag is in progress.
+   *
+   * Holds only the pointer that owns the stroke and the ordered, unique tiles
+   * it has crossed. It is *not* game state: no command has run for these tiles
+   * and nothing is saved until the pointer is released inside the canvas. A
+   * second pointer, Escape, Cancel or a read-only transition simply drops it.
+   */
+  private wallStroke: { pointerId: number; path: Tile[] } | null = null;
 
   private panPointerId = -1;
   private panLastX = 0;
@@ -509,7 +538,7 @@ export class BootScene extends Phaser.Scene {
     this.input.on('pointerdown', this.onPointerDown, this);
     this.input.on('pointermove', this.onPointerMove, this);
     this.input.on('pointerup', this.onPointerUp, this);
-    this.input.on('pointerupoutside', this.onPointerUp, this);
+    this.input.on('pointerupoutside', this.onPointerUpOutside, this);
     this.input.on('wheel', this.onWheel, this);
 
     this.input.keyboard?.on('keydown', this.onKeyDown, this);
@@ -520,7 +549,7 @@ export class BootScene extends Phaser.Scene {
     this.input.off('pointerdown', this.onPointerDown, this);
     this.input.off('pointermove', this.onPointerMove, this);
     this.input.off('pointerup', this.onPointerUp, this);
-    this.input.off('pointerupoutside', this.onPointerUp, this);
+    this.input.off('pointerupoutside', this.onPointerUpOutside, this);
     this.input.off('wheel', this.onWheel, this);
     this.input.keyboard?.off('keydown', this.onKeyDown, this);
     this.scale.off(Phaser.Scale.Events.RESIZE, this.onResize, this);
@@ -528,6 +557,21 @@ export class BootScene extends Phaser.Scene {
   }
 
   private onPointerDown(pointer: Phaser.Input.Pointer): void {
+    if (this.wallPlacement) {
+      if (this.wallStroke !== null) {
+        // A second pointer means pinch or an accidental second touch. Drop the
+        // draft now: whichever finger lifts first must not commit it.
+        this.abortWallStroke();
+        return;
+      }
+      // Only the primary button draws a line; a right/middle press must never
+      // start one. Touch reports button 0, same as the left mouse button.
+      if (pointer.button !== 0) return;
+      this.wallStroke = { pointerId: pointer.id, path: [] };
+      this.extendWallStroke(pointer);
+      return;
+    }
+
     if (this.panPointerId === -1) {
       this.panPointerId = pointer.id;
       this.panLastX = pointer.x;
@@ -542,12 +586,31 @@ export class BootScene extends Phaser.Scene {
     const p2 = this.input.pointer2;
 
     if (p1.isDown && p2.isDown) {
+      // Two fingers are a camera gesture, never a wall stroke.
+      if (this.wallStroke !== null) this.abortWallStroke();
       const distance = Phaser.Math.Distance.Between(p1.x, p1.y, p2.x, p2.y);
       if (this.lastPinchDistance > 0 && distance > 0) {
         this.zoomAtScreen((p1.x + p2.x) / 2, (p1.y + p2.y) / 2, distance / this.lastPinchDistance);
       }
       this.lastPinchDistance = distance;
       this.panPointerId = -1;
+      return;
+    }
+
+    if (this.wallPlacement) {
+      // Wall mode owns the primary pointer: a drag grows the stroke instead of
+      // panning. Hover still updates, so the 1x1 fallback ghost follows the
+      // pointer before the first press. Cancel is the documented way to get
+      // one-finger camera panning back while the mode is open; wheel and the
+      // arrow keys keep working throughout.
+      if (
+        this.wallStroke !== null &&
+        pointer.id === this.wallStroke.pointerId &&
+        pointer.isDown
+      ) {
+        this.extendWallStroke(pointer);
+      }
+      this.updateHover(pointer);
       return;
     }
 
@@ -575,11 +638,44 @@ export class BootScene extends Phaser.Scene {
       this.lastPinchDistance = 0;
     }
 
+    if (this.wallPlacement) {
+      // Wall mode never taps for selection and never ends a pan: the release
+      // either commits the draft or ends an empty stroke.
+      if (this.wallStroke !== null && pointer.id === this.wallStroke.pointerId) {
+        if (pointer.wasCanceled) {
+          // Phaser reports a `touchcancel` as an up with `wasCanceled` set. The
+          // browser took the touch away — the home gesture, a scroll, an
+          // incoming call — so this is not an intentional drop.
+          this.abortWallStroke();
+        } else {
+          this.finishWallStroke();
+        }
+      }
+      if (this.panPointerId === pointer.id) this.panPointerId = -1;
+      return;
+    }
+
     if (this.panPointerId === pointer.id) {
       const isTap = this.panDistance < 8 && this.time.now - this.panStartedAt < 600;
       this.panPointerId = -1;
       if (isTap) this.selectTileAt(pointer);
     }
+  }
+
+  /**
+   * A pointer that was released somewhere other than the canvas.
+   *
+   * Outside wall mode this is still treated as a release (so the previous tap
+   * behaviour survives). During a wall stroke it is not an intentional drop on
+   * the village: the draft is discarded and nothing is placed or saved.
+   */
+  private onPointerUpOutside(pointer: Phaser.Input.Pointer): void {
+    if (this.wallPlacement) {
+      this.abortWallStroke();
+      if (this.panPointerId === pointer.id) this.panPointerId = -1;
+      return;
+    }
+    this.onPointerUp(pointer);
   }
 
   private onWheel(
@@ -1009,11 +1105,17 @@ export class BootScene extends Phaser.Scene {
     // Replacing the whole interaction also drops any move session in progress,
     // so a shop click can never leave a ghost behind.
     this.interaction = placementInteraction(buildingType);
+    this.wallStroke = null;
     this.selectedEntity = null;
     this.selectedTile = null;
     this.redrawSelection();
     this.hud.setSelection(null);
-    this.hud.setPlacementMode(buildingType);
+    this.hud.setPlacementMode(
+      buildingType,
+      buildingType === WALL_BUILDING_TYPE
+        ? { instructionsKey: 'placement.wallInstructions' }
+        : undefined,
+    );
     this.redrawPlacementGhost(this.hoverTile);
   }
 
@@ -1025,6 +1127,9 @@ export class BootScene extends Phaser.Scene {
    */
   private cancelMode(): void {
     this.interaction = cancelInteraction();
+    // An uncommitted stroke has no state and no save behind it, so cancelling
+    // is complete the moment the draft is dropped.
+    this.wallStroke = null;
     this.placementLayer.clear();
     this.hud.setPlacementMode(null);
     this.hud.setHint();
@@ -1032,9 +1137,14 @@ export class BootScene extends Phaser.Scene {
 
   /** Draws the ghost that belongs to the current mode, if any. */
   private redrawGhost(tile: Tile | null): void {
-    if (this.interaction.kind === 'moving') this.redrawMoveGhost(tile);
-    else if (this.interaction.kind === 'placing') this.redrawPlacementGhost(tile);
-    else this.placementLayer.clear();
+    if (this.interaction.kind === 'moving') {
+      this.redrawMoveGhost(tile);
+    } else if (this.interaction.kind === 'placing') {
+      if (this.wallPlacement && this.wallStroke !== null) this.redrawWallStroke();
+      else this.redrawPlacementGhost(tile);
+    } else {
+      this.placementLayer.clear();
+    }
   }
 
   private redrawPlacementGhost(tile: Tile | null): void {
@@ -1073,6 +1183,157 @@ export class BootScene extends Phaser.Scene {
     this.placementLayer.lineStyle(3, color, 1);
     this.placementLayer.strokePoints(footprint, true);
     this.hud.setPlacementFeedback(preview.valid ? 'valid' : 'invalid');
+  }
+
+  // ------------------------------------------------------------- wall strokes
+
+  /**
+   * Grows the wall stroke to the tile under `pointer`.
+   *
+   * The pointer is sampled, not streamed: `extendWallPath` interpolates every
+   * cell between the last sample and this one, so a fast drag cannot leave
+   * holes, and it never repeats a cell the stroke already crossed. Nothing is
+   * executed here — the preview re-plans against the command, and no save is
+   * written until the pointer is released.
+   */
+  private extendWallStroke(pointer: Phaser.Input.Pointer): void {
+    const stroke = this.wallStroke;
+    if (stroke === null) return;
+
+    const world = this.pointerToWorld(pointer);
+    const tile = screenToTileFloor(world.x, world.y);
+    // Outside the map there is no cell to add; the trail so far is kept so the
+    // player can drag back in without starting over.
+    if (!this.isInsideMap(tile)) return;
+
+    const extended = extendWallPath(stroke.path, tile);
+    if (extended.length === stroke.path.length) return;
+
+    stroke.path = extended;
+    this.redrawWallStroke();
+  }
+
+  /**
+   * Draws the stroke as the command would accept it.
+   *
+   * Accepted cells are green, the first refused cell is red, and nothing after
+   * it is drawn as possible: the stroke really does stop there. The plan is a
+   * prediction, so it is thrown away — the release re-plans from scratch.
+   */
+  private redrawWallStroke(): void {
+    this.placementLayer.clear();
+    const stroke = this.wallStroke;
+    const buildingType = this.placementType;
+    if (stroke === null || buildingType === null) return;
+
+    if (stroke.path.length === 0) {
+      this.hud.setPlacementFeedback('outside');
+      return;
+    }
+
+    const plan = planWallStroke({
+      state: this.playerState,
+      config: GAME_CONFIG,
+      buildingType,
+      path: stroke.path,
+      now: this.getNow(),
+      readOnly: this.readOnly,
+    });
+
+    if (plan.kind === 'refused') {
+      this.abortWallStroke();
+      this.hud.setHint(this.readOnlyHintKey);
+      return;
+    }
+
+    for (const tile of plan.accepted) {
+      this.drawTileOverlay(this.placementLayer, tile, 0x57d98a, 0.28, 0x57d98a, 2);
+    }
+    if (plan.rejected !== null) {
+      this.drawTileOverlay(this.placementLayer, plan.rejected.tile, 0xef6a6a, 0.28, 0xef6a6a, 3);
+    }
+
+    // A partially accepted stroke is still a viable one: the release will place
+    // the prefix and explain where it stopped.
+    this.hud.setPlacementFeedback(
+      plan.rejected !== null && plan.accepted.length === 0 ? 'invalid' : 'valid',
+    );
+  }
+
+  /**
+   * Releases the stroke: commits the accepted prefix, or explains why none.
+   *
+   * The plan is recomputed here rather than reused from the last pointer move,
+   * because the village can change during a drag (a builder may finish, and the
+   * simulation's clock advances). A stroke of zero segments touches neither the
+   * state nor the save, and wall mode stays open either way so the player can
+   * draw the next line without going back to the shop.
+   */
+  private finishWallStroke(): void {
+    const stroke = this.wallStroke;
+    this.wallStroke = null;
+    this.placementLayer.clear();
+    if (stroke === null) return;
+
+    const buildingType = this.placementType;
+    if (buildingType === null) return;
+
+    if (stroke.path.length === 0) {
+      this.hud.setPlacementFeedback('outside');
+      return;
+    }
+
+    const now = this.getNow();
+    const plan = planWallStroke({
+      state: this.playerState,
+      config: GAME_CONFIG,
+      buildingType,
+      path: stroke.path,
+      now,
+      readOnly: this.readOnly,
+    });
+
+    if (plan.kind === 'refused') {
+      this.cancelMode();
+      this.hud.setHint(this.readOnlyHintKey);
+      return;
+    }
+
+    const feedback = wallStrokeFeedback(plan);
+
+    if (!plan.changed) {
+      // Nothing was accepted: the state, the save and the mode are all
+      // untouched, so the player can simply try another line.
+      this.redrawGhost(this.hoverTile);
+      this.hud.setPlacementFeedback('invalid');
+      if (feedback) this.hud.setHint(feedback.key, feedback.params);
+      return;
+    }
+
+    this.playerState = plan.state;
+    this.persist();
+
+    this.drawVillageEntities();
+    this.hud.setVillageSnapshot(buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now));
+    this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
+    // Hover preview from the new state, so the cells just filled stop being
+    // advertised as free.
+    this.redrawGhost(this.hoverTile);
+    this.hud.setPlacementFeedback('none');
+    if (feedback) this.hud.setHint(feedback.key, feedback.params);
+  }
+
+  /**
+   * Drops an uncommitted stroke.
+   *
+   * Used by Escape/Cancel, a pinch, a second pointer and a read-only
+   * transition. No command has run for the draft, so there is nothing to undo.
+   */
+  private abortWallStroke(): void {
+    if (this.wallStroke === null) return;
+    this.wallStroke = null;
+    this.placementLayer.clear();
+    if (this.wallPlacement) this.hud.setPlacementFeedback('none');
   }
 
   private tryPlaceBuildingAt(pointer: Phaser.Input.Pointer): void {
@@ -1157,6 +1418,7 @@ export class BootScene extends Phaser.Scene {
     }
 
     this.interaction = started.interaction;
+    this.wallStroke = null;
     // The selection panel stays open: it carries the building's details and its
     // original coordinates, which is the reference point for the move.
     this.hud.setMoveMode(started.interaction.session.buildingType);
