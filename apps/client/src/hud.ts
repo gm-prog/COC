@@ -6,6 +6,49 @@ import {
 import type { BuildingShopItem } from './villageShop';
 import type { BuildingLevel, ResourceId } from '@coc/sim-core';
 import type { BuildingUpgradeSnapshot } from './villageUpgrade';
+import type { SaveProblemCode } from './persistence/villageSave';
+import type { SaveStatus } from './persistence/autosave';
+
+/**
+ * Everything the save indicator can show.
+ *
+ * The first four are the live autosave status; the rest are the reasons saving
+ * is switched off for this session.
+ */
+export type SaveIndicator =
+  | SaveStatus
+  | 'unavailable'
+  | 'unreadable'
+  | 'incompatible';
+
+/** Translation key for each indicator state. */
+const SAVE_INDICATOR_KEYS: Record<SaveIndicator, TranslationKey> = {
+  idle: 'save.saved',
+  saving: 'save.saving',
+  saved: 'save.saved',
+  blocked: 'save.blocked',
+  unavailable: 'save.unavailable',
+  unreadable: 'save.unreadable',
+  incompatible: 'save.incompatible',
+};
+
+/**
+ * Maps a load problem to the indicator that explains it.
+ *
+ * Exported so the scene does not have to know which codes mean "no store" and
+ * which mean "there is a record we refused to touch".
+ */
+export function saveIndicatorForProblem(problem: SaveProblemCode): SaveIndicator {
+  switch (problem) {
+    case 'storage_unavailable':
+      return 'unavailable';
+    case 'incompatible_config':
+      return 'incompatible';
+    case 'malformed':
+    case 'unsupported_schema':
+      return 'unreadable';
+  }
+}
 
 /**
  * Thin wrapper over the DOM debug HUD (index.html).
@@ -238,6 +281,29 @@ export class Hud {
 
   setVersions(versions: { protocol: string; simCore: string; config: string }): void {
     this.text('hud-versions', t('hud.versions', versions));
+  }
+
+  /**
+   * Shows the persistence indicator.
+   *
+   * `idle` hides it: a brand-new session with nothing worth saving should not
+   * announce anything. Every other state is real information, so it stays on
+   * screen rather than flashing past.
+   *
+   * Called only when the state actually changes (see `VillageAutosave`), so this
+   * never runs once per frame.
+   */
+  setSaveIndicator(state: SaveIndicator): void {
+    const node = this.el('save-status');
+    if (!node) return;
+    node.dataset.saveState = state;
+    if (state === 'idle') {
+      node.hidden = true;
+      node.textContent = '';
+      return;
+    }
+    node.textContent = t(SAVE_INDICATOR_KEYS[state]);
+    node.hidden = false;
   }
 
   setVillageSnapshot(snapshot: VillageHudSnapshot): void {

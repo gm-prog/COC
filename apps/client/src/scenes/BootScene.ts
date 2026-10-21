@@ -5,7 +5,6 @@ import { PROTOCOL_VERSION } from '@coc/protocol';
 import {
   applyCommand,
   catchUp,
-  createNewPlayerState,
   GRID,
   SIM_CORE_VERSION,
   type BuildingCategory,
@@ -28,6 +27,9 @@ import { buildVillageHudSnapshot } from '../villageHud';
 import { previewBuildingPlacement } from '../villagePlacement';
 import { listBuildingShopItems } from '../villageShop';
 import { getBuildingUpgradeSnapshot } from '../villageUpgrade';
+import { saveIndicatorForProblem } from '../hud';
+import type { VillageAutosave } from '../persistence/autosave';
+import type { VillageBootstrap } from '../persistence/bootstrap';
 import {
   findVillageEntityAtTile,
   listVillageEntities,
@@ -131,8 +133,27 @@ export class BootScene extends Phaser.Scene {
   private fpsFrames = 0;
   private villageHudElapsed = 0;
 
-  constructor() {
+  private readonly village: VillageBootstrap;
+  private autosave: VillageAutosave | null = null;
+
+  /**
+   * Best-effort flush when the page is being hidden.
+   *
+   * This is a belt to the autosave's braces, not the durability mechanism: a
+   * mobile browser may kill a backgrounded page without ever firing these.
+   * Progress is already written by the debounced autosave after each command.
+   */
+  private readonly flushOnHide = (): void => {
+    void this.autosave?.flush();
+  };
+
+  private readonly onVisibilityChange = (): void => {
+    if (document.visibilityState === 'hidden') this.flushOnHide();
+  };
+
+  constructor(village: VillageBootstrap) {
     super({ key: BootScene.KEY });
+    this.village = village;
   }
 
   create(): void {
@@ -166,9 +187,26 @@ export class BootScene extends Phaser.Scene {
       this.placementLayer,
     ]);
 
-    // Offline client state starts at the real local timestamp; this prevents the
-    // first command from accruing resources since the Unix epoch.
-    this.playerState = createNewPlayerState(GAME_CONFIG, Date.now());
+    // The village was resolved before the game was constructed (see
+    // `persistence/bootstrap.ts`): either a save reconciled to now, or a fresh
+    // configured starter. The scene never decides this itself.
+    this.playerState = this.village.state;
+    this.autosave = this.village.autosave;
+    this.hud.setSaveIndicator(
+      this.village.problem === null ? 'idle' : saveIndicatorForProblem(this.village.problem.code),
+    );
+    if (this.autosave) {
+      this.autosave.setOnStatus((status) => this.hud.setSaveIndicator(status));
+      // A runtime write failure (quota, revoked permission) is surfaced here;
+      // the game keeps running in memory either way.
+      this.autosave.setOnError(() => this.hud.setSaveIndicator('blocked'));
+      window.addEventListener('pagehide', this.flushOnHide);
+      document.addEventListener('visibilitychange', this.onVisibilityChange);
+      // A first-time player has a village worth keeping: persist the starter
+      // immediately. Only reachable when the store was readable and empty.
+      if (this.village.source === 'new') this.persist();
+    }
+
     this.hud.setVillageSnapshot(
       buildVillageHudSnapshot(this.playerState, GAME_CONFIG, Date.now()),
     );
@@ -180,6 +218,25 @@ export class BootScene extends Phaser.Scene {
 
     this.setupInput();
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.teardownInput, this);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.teardownPersistence, this);
+  }
+
+  private teardownPersistence(): void {
+    window.removeEventListener('pagehide', this.flushOnHide);
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    this.autosave?.dispose();
+  }
+
+  /**
+   * Queues the current village for saving.
+   *
+   * Called after accepted commands and after catch-up reports completions.
+   * Production that merely accrues is *not* saved: `buffer.lastAccruedAt` plus
+   * the exact remainder make it derivable, so a reload recomputes exactly the
+   * gold the village earned — no duplicated reward, no lost one.
+   */
+  private persist(): void {
+    this.autosave?.schedule(this.playerState);
   }
 
   // ---------------------------------------------------------------- rendering
@@ -633,6 +690,7 @@ export class BootScene extends Phaser.Scene {
 
     const collection = result.events.find((event) => event.type === 'ResourceCollected');
     this.playerState = result.state;
+    this.persist();
     this.hud.setVillageSnapshot(
       buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
     );
@@ -716,6 +774,7 @@ export class BootScene extends Phaser.Scene {
     }
 
     this.playerState = result.state;
+    this.persist();
     this.hud.setVillageSnapshot(
       buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
     );
@@ -819,6 +878,7 @@ export class BootScene extends Phaser.Scene {
     }
 
     this.playerState = result.state;
+    this.persist();
     this.selectedEntity = null;
     this.selectedTile = null;
     this.redrawSelection();
@@ -868,6 +928,10 @@ export class BootScene extends Phaser.Scene {
         );
 
         if (caught.events.length > 0) {
+          // Constructions and upgrades completed during this window. The
+          // accrual that produced no event is deliberately not saved;
+          // `lastAccruedAt` reproduces it after a reload.
+          this.persist();
           this.drawVillageEntities();
           this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
         }

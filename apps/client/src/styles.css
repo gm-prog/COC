@@ -115,6 +115,28 @@ body {
   opacity: 0.75;
 }
 
+.hud__save-status {
+  margin: 0;
+  align-self: center;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.hud__save-status[data-save-state='blocked'],
+.hud__save-status[data-save-state='unavailable'],
+.hud__save-status[data-save-state='unreadable'],
+.hud__save-status[data-save-state='incompatible'] {
+  color: var(--danger, #e58b82);
+}
+
+.hud__save-status[hidden] {
+  display: none;
+}
+
 
 .selection-panel {
   position: absolute;
