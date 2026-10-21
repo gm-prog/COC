@@ -155,14 +155,16 @@ async function storedRevision(page: Page): Promise<number> {
 }
 
 /**
- * Long jumps use `fastForward`, which fires each due timer at most once.
+ * A long jump fires the due timer once: a debounce has to run, and `Date.now()`
+ * has to move past a wall's `finishAt`.
  *
- * `runFor` drains every animation frame in the window; with a paused clock and
- * a scene that renders on `requestAnimationFrame`, a six-second jump means
- * hundreds of frames per call and the suite spent minutes replaying them (once
- * long enough for the test timeout to fire inside `runFor`). A builder or a
- * debounce only needs the timer to fire once, so one frame afterwards
- * (`settle`) is enough to refresh the HUD.
+ * `runFor` drains every animation frame in the window instead, and with the
+ * clock paused a six-second window means hundreds of frames: the suite spent
+ * minutes inside those calls, and a window that ran no frame at all left the
+ * builder readout stale. The tests therefore never wait for a construction to
+ * finish while the page is live — they jump, then reload, and let the ordinary
+ * restore path replay the elapsed time through `catchUp`, which is the same
+ * code a returning player gets.
  */
 async function jump(page: Page, ms: number): Promise<void> {
   await page.clock.fastForward(ms);
@@ -313,29 +315,47 @@ test('a wall line is dragged, saved and restored; mode stays open', async ({ pag
   //    panel; if the drag had panned, this page point would report another tile.
   await hoverTile(page, CAMERA_PROBE);
 
-  // 5. Builders finish, and a second stroke needs no trip back to the shop.
+  // 5. Save the line, let its five seconds elapse, then reload. Restoration
+  //    replays the elapsed time through `catchUp`, so the builders come back
+  //    free and the walls come back finished.
+  await jump(page, SAVE_DEBOUNCE_MS);
+  await waitForRevisionAfter(page, revisionAtLoad);
   await jump(page, WALL_FINISH_MS);
+
+  await page.reload();
+  await expect(page.locator('#game canvas')).toBeVisible();
+  await expect(page.locator('#resource-gold-value')).toHaveText('980 / 1600');
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
+
+  // 6. The two accepted cells are level-1 walls after the reload.
+  for (const tile of FIRST_STROKE.slice(0, 2)) {
+    await tapTile(page, tile);
+    await expect(page.locator('#selection-title')).toHaveText('Wall');
+    await expect(page.locator('#selection-meta')).toHaveText(`Level 1 · Tile ${tile.x}, ${tile.y}`);
+  }
+
+  // 7. A second stroke is just the shop again, and it stays open afterwards.
+  const revisionAfterReload = await storedRevision(page);
+  await (await openWallCard(page)).choose.click();
   await dragTiles(page, SECOND_STROKE);
 
   await expect(page.locator('#resource-gold-value')).toHaveText('960 / 1600');
   await expect(page.locator('#builders-count')).toHaveText('0 / 2 available');
   await expect(page.getByTestId('hint')).toHaveText('Placed 2 wall segments.');
   await expect(page.locator('#placement-banner')).toBeVisible();
+  await expect(page.locator('#placement-title')).toHaveText('Place Wall');
 
-  // 6. Let both walls finish, wait for the write to commit, then reload.
-  await jump(page, WALL_FINISH_MS);
-  await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
+  // 8. The whole line survives another save-and-restore: four walls, and the
+  //    cells the stroke never reached are still empty.
   await jump(page, SAVE_DEBOUNCE_MS);
-  await waitForRevisionAfter(page, revisionAtLoad);
+  await waitForRevisionAfter(page, revisionAfterReload);
+  await jump(page, WALL_FINISH_MS);
 
   await page.reload();
   await expect(page.locator('#game canvas')).toBeVisible();
   await expect(page.locator('#resource-gold-value')).toHaveText('960 / 1600');
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
 
-  // 7. The four accepted cells came back as level-1 walls; the cells the stroke
-  //    never reached are still empty. Tapping one of those hides the panel.
   for (const tile of [...FIRST_STROKE.slice(0, 2), ...SECOND_STROKE]) {
     await tapTile(page, tile);
     await expect(page.locator('#selection-title')).toHaveText('Wall');
@@ -411,12 +431,19 @@ test('cancel, a blocked tile and a duplicate crossing all behave honestly', asyn
     'Placed 2 wall segments, then stopped: that tile is already taken.',
   );
   await jump(page, SAVE_DEBOUNCE_MS);
-  const revisionAfterRock = await waitForRevisionAfter(page, revisionBefore);
+  await waitForRevisionAfter(page, revisionBefore);
 
-  // Free the builder, then cross the same two tiles repeatedly: one wall each,
-  // one charge each.
+  // 4. Let the prefix finish in restoration, which also frees the builders, then
+  //    cross the same two tiles repeatedly: one wall each, one charge each.
   await jump(page, WALL_FINISH_MS);
+
+  await page.reload();
+  await expect(page.locator('#game canvas')).toBeVisible();
+  await expect(page.locator('#resource-gold-value')).toHaveText('980 / 1600');
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
+  const revisionAfterReload = await storedRevision(page);
+
+  await (await openWallCard(page)).choose.click();
   await dragTiles(page, [
     { x: 14, y: 30 },
     { x: 15, y: 30 },
@@ -426,11 +453,11 @@ test('cancel, a blocked tile and a duplicate crossing all behave honestly', asyn
   await expect(page.locator('#resource-gold-value')).toHaveText('960 / 1600');
   await expect(page.getByTestId('hint')).toHaveText('Placed 2 wall segments.');
 
-  // 4. All of it survives a reload: the prefix wall, the two crossed tiles, and
+  // 5. All of it survives a reload: the prefix wall, the two crossed tiles, and
   //    the rock that stopped the stroke.
-  await jump(page, WALL_FINISH_MS);
   await jump(page, SAVE_DEBOUNCE_MS);
-  await waitForRevisionAfter(page, revisionAfterRock);
+  await waitForRevisionAfter(page, revisionAfterReload);
+  await jump(page, WALL_FINISH_MS);
 
   await page.reload();
   await expect(page.locator('#game canvas')).toBeVisible();
