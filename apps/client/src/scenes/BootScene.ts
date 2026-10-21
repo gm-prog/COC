@@ -24,6 +24,16 @@ import { Hud } from '../hud';
 import { t, type TranslationKey } from '../i18n';
 import { buildVillageHudSnapshot } from '../villageHud';
 import { previewBuildingPlacement } from '../villagePlacement';
+import {
+  beginMoveInteraction,
+  cancelInteraction,
+  IDLE_INTERACTION,
+  placementInteraction,
+  previewBuildingMove,
+  resolveMoveAttempt,
+  type MoveSession,
+  type VillageInteraction,
+} from '../villageMove';
 import { listBuildingShopItems } from '../villageShop';
 import { getBuildingUpgradeSnapshot } from '../villageUpgrade';
 import { readOnlyHintFor, saveIndicatorForProblem } from '../hud';
@@ -116,7 +126,26 @@ export class BootScene extends Phaser.Scene {
 
   private playerState!: PlayerState;
   private selectedEntity: VillageEntity | null = null;
-  private placementType: string | null = null;
+
+  /**
+   * What the map is currently doing: nothing, placing a new building, or moving
+   * an existing one.
+   *
+   * One union rather than separate `placementType` / `moveTarget` fields, so the
+   * two modes cannot both be active: assigning a variant replaces the previous
+   * one, and every branch that leaves a mode goes through `cancelInteraction()`.
+   */
+  private interaction: VillageInteraction = IDLE_INTERACTION;
+
+  /** The building type being placed, if any. Read-only view of `interaction`. */
+  private get placementType(): string | null {
+    return this.interaction.kind === 'placing' ? this.interaction.buildingType : null;
+  }
+
+  /** The move session in progress, if any. Read-only view of `interaction`. */
+  private get moveSession(): MoveSession | null {
+    return this.interaction.kind === 'moving' ? this.interaction.session : null;
+  }
   private transform: CameraTransform = { zoom: 1, panX: 0, panY: 0 };
 
   private panPointerId = -1;
@@ -191,9 +220,10 @@ export class BootScene extends Phaser.Scene {
     });
     this.hud.setShopHandlers({
       onSelectBuilding: (buildingType) => this.beginPlacement(buildingType),
-      onCancelPlacement: () => this.cancelPlacement(),
+      onCancelPlacement: () => this.cancelMode(),
       onCollectResource: (buildingId) => this.collectResourceFromBuilding(buildingId),
       onStartUpgrade: (buildingId) => this.startBuildingUpgrade(buildingId),
+      onMoveBuilding: (buildingId) => this.beginMove(buildingId),
     });
 
     this.world = this.add.container(0, 0);
@@ -270,7 +300,9 @@ export class BootScene extends Phaser.Scene {
     }
     this.readOnly = true;
     this.readOnlyHintKey = hintKey;
-    if (this.placementType !== null) this.cancelPlacement();
+    // Whichever mode is open, it has to close: a ghost left on the map would
+    // suggest a drop is still possible in a session that can never save.
+    this.cancelMode();
     this.hud.setSaveIndicator(indicator);
     this.hud.setHint(hintKey);
   }
@@ -567,7 +599,7 @@ export class BootScene extends Phaser.Scene {
         this.recenter();
         break;
       case 'Escape':
-        if (this.placementType !== null) this.cancelPlacement();
+        if (this.interaction.kind !== 'idle') this.cancelMode();
         else this.hud.setShopOpen(false);
         break;
       case 'ArrowLeft':
@@ -622,7 +654,7 @@ export class BootScene extends Phaser.Scene {
         this.hud.clearTile();
         this.hud.clearZone();
       }
-      if (this.placementType !== null) this.redrawPlacementGhost(null);
+      this.redrawGhost(null);
       return;
     }
     const changed = !this.hoverTile || this.hoverTile.x !== tile.x || this.hoverTile.y !== tile.y;
@@ -631,7 +663,7 @@ export class BootScene extends Phaser.Scene {
       this.redrawHover();
       this.hud.setTile(tile.x, tile.y);
       this.hud.setZone(this.isBuildable(tile));
-      if (this.placementType !== null) this.redrawPlacementGhost(tile);
+      this.redrawGhost(tile);
     }
   }
 
@@ -645,8 +677,12 @@ export class BootScene extends Phaser.Scene {
   }
 
   private selectTileAt(pointer: Phaser.Input.Pointer): void {
-    if (this.placementType !== null) {
+    if (this.interaction.kind === 'placing') {
       this.tryPlaceBuildingAt(pointer);
+      return;
+    }
+    if (this.interaction.kind === 'moving') {
+      this.tryMoveAt(pointer);
       return;
     }
 
@@ -865,7 +901,9 @@ export class BootScene extends Phaser.Scene {
       return;
     }
 
-    this.placementType = buildingType;
+    // Replacing the whole interaction also drops any move session in progress,
+    // so a shop click can never leave a ghost behind.
+    this.interaction = placementInteraction(buildingType);
     this.selectedEntity = null;
     this.selectedTile = null;
     this.redrawSelection();
@@ -874,11 +912,24 @@ export class BootScene extends Phaser.Scene {
     this.redrawPlacementGhost(this.hoverTile);
   }
 
-  private cancelPlacement(): void {
-    this.placementType = null;
+  /**
+   * Leaves placement or move mode and clears the ghost.
+   *
+   * The banner's Cancel button and the Escape key both land here, so a stale
+   * target cannot outlive the panel that created it.
+   */
+  private cancelMode(): void {
+    this.interaction = cancelInteraction();
     this.placementLayer.clear();
     this.hud.setPlacementMode(null);
     this.hud.setHint();
+  }
+
+  /** Draws the ghost that belongs to the current mode, if any. */
+  private redrawGhost(tile: Tile | null): void {
+    if (this.interaction.kind === 'moving') this.redrawMoveGhost(tile);
+    else if (this.interaction.kind === 'placing') this.redrawPlacementGhost(tile);
+    else this.placementLayer.clear();
   }
 
   private redrawPlacementGhost(tile: Tile | null): void {
@@ -962,12 +1013,177 @@ export class BootScene extends Phaser.Scene {
     this.selectedTile = null;
     this.redrawSelection();
     this.hud.setSelection(null);
-    this.cancelPlacement();
+    this.cancelMode();
     this.drawVillageEntities();
     this.hud.setVillageSnapshot(
       buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
     );
     this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
+  }
+
+  // ---------------------------------------------------------------- move mode
+
+  /**
+   * Enters Move Mode for the building the player selected.
+   *
+   * Nothing about the village changes here: no command runs, no resource moves,
+   * no save is queued. Only the interaction and the banner change, so an
+   * abandoned move is indistinguishable from never having started one.
+   */
+  private beginMove(buildingId: number): void {
+    // Refused up front rather than at the drop: a ghost would imply the move can
+    // be committed, and in a read-only session it never can.
+    if (this.readOnly) {
+      this.hud.setHint(this.readOnlyHintKey);
+      return;
+    }
+
+    const entity =
+      listVillageEntities(this.playerState, GAME_CONFIG).find(
+        (candidate) => candidate.instance.id === buildingId,
+      ) ?? null;
+    const started = beginMoveInteraction(this.playerState, entity);
+    if (!started.ok) {
+      // Not reachable from the rendered panel — the button only exists for a
+      // building that is in the village — but a stale panel must not start a
+      // mode with no target. Leave the map untouched and drop any stale hint.
+      this.hud.setHint();
+      return;
+    }
+
+    this.interaction = started.interaction;
+    // The selection panel stays open: it carries the building's details and its
+    // original coordinates, which is the reference point for the move.
+    this.hud.setMoveMode(started.interaction.session.buildingType);
+    // No ghost until the player points somewhere: the banner asks for a
+    // destination, and assuming one (the last hovered tile) would preview a
+    // move the player has not chosen.
+    this.placementLayer.clear();
+  }
+
+  /**
+   * Draws the destination preview for the move in progress.
+   *
+   * The candidate footprint is coloured by asking the real command, and the
+   * building itself stays drawn at its original position: the village is only
+   * changed when a click commits, never while hovering.
+   */
+  private redrawMoveGhost(tile: Tile | null): void {
+    this.placementLayer.clear();
+    const session = this.moveSession;
+    if (session === null) return;
+    if (tile === null) {
+      this.hud.setMoveFeedback('outside');
+      return;
+    }
+
+    const definition = GAME_CONFIG.buildings.find(
+      (candidate) => candidate.id === session.buildingType,
+    );
+    if (!definition) {
+      this.hud.setMoveFeedback('invalid');
+      return;
+    }
+
+    const preview = previewBuildingMove(
+      this.playerState,
+      GAME_CONFIG,
+      session.buildingId,
+      tile.x,
+      tile.y,
+      this.getNow(),
+    );
+    const color = preview.valid ? 0x57d98a : 0xef6a6a;
+    const footprint = tileRectToScreenQuad(
+      tile.x,
+      tile.y,
+      definition.size.w,
+      definition.size.h,
+    );
+    this.placementLayer.fillStyle(color, 0.2);
+    this.placementLayer.fillPoints(footprint, true);
+    this.placementLayer.lineStyle(3, color, 1);
+    this.placementLayer.strokePoints(footprint, true);
+    this.hud.setMoveFeedback(preview.valid ? 'valid' : 'invalid');
+  }
+
+  /**
+   * Commits the move at the tapped tile, or reports why it cannot.
+   *
+   * The decision comes from `resolveMoveAttempt`, which runs the authoritative
+   * command through the read-only gate; the scene only adopts a state that came
+   * back as `moved`. A rejected destination leaves the village, the save and
+   * the mode untouched so the player can simply pick another tile.
+   */
+  private tryMoveAt(pointer: Phaser.Input.Pointer): void {
+    const session = this.moveSession;
+    if (session === null) return;
+
+    if (this.readOnly) {
+      this.cancelMode();
+      this.hud.setHint(this.readOnlyHintKey);
+      return;
+    }
+
+    const world = this.pointerToWorld(pointer);
+    const tile = screenToTileFloor(world.x, world.y);
+    if (!this.isInsideMap(tile)) {
+      this.hud.setMoveFeedback('outside');
+      return;
+    }
+
+    this.hoverTile = tile;
+    this.redrawHover();
+    this.hud.setTile(tile.x, tile.y);
+    this.hud.setZone(this.isBuildable(tile));
+    this.redrawMoveGhost(tile);
+
+    const now = this.getNow();
+    const attempt = resolveMoveAttempt({
+      state: this.playerState,
+      config: GAME_CONFIG,
+      session,
+      x: tile.x,
+      y: tile.y,
+      now,
+      readOnly: this.readOnly,
+    });
+
+    if (attempt.kind === 'refused') {
+      // Saving was switched off underneath us (a conflict can land at any
+      // time). Close the mode; the session's own warning explains why.
+      this.cancelMode();
+      this.hud.setHint(this.readOnlyHintKey);
+      return;
+    }
+    if (attempt.kind === 'noop') {
+      // Tapping the building's own tiles means "I am done", not "re-place it
+      // here": no command, no event, no save.
+      this.cancelMode();
+      this.hud.setHint('move.noop');
+      return;
+    }
+    if (attempt.kind === 'rejected') {
+      this.hud.setMoveFeedback('invalid');
+      return;
+    }
+
+    this.playerState = attempt.state;
+    this.persist();
+    this.cancelMode();
+    // Redraw from the authoritative state, then re-derive the selected entity so
+    // the panel shows the new coordinates.
+    this.drawVillageEntities();
+    this.refreshSelectionAfterCatchUp();
+    this.hud.setVillageSnapshot(
+      buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
+    );
+    this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
+    this.hud.setHint('move.done', {
+      building: t(('building.' + session.buildingType) as TranslationKey),
+      x: tile.x,
+      y: tile.y,
+    });
   }
 
   private refreshSelectionAfterCatchUp(): void {
@@ -1028,7 +1244,7 @@ export class BootScene extends Phaser.Scene {
         // Collector buffers can grow without completion events, so keep the
         // selected building's buffered amount in sync with the HUD.
         this.refreshSelectionAfterCatchUp();
-        if (this.placementType !== null) this.redrawPlacementGhost(this.hoverTile);
+        this.redrawGhost(this.hoverTile);
       }
       this.villageHudElapsed = 0;
     }

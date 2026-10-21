@@ -41,9 +41,10 @@ work is finished and is summarised here rather than repeated._
 
 **Immediate task:** Phase 3 is in progress. The browser smoke test for the build →
 wait/collect → upgrade journey exists (`e2e/`, `pnpm test:e2e`, wired into CI), and the village now
-persists locally in IndexedDB with autosave, explicit schema versioning and safe restoration. What
-remains is move mode, drag-to-place walls, obstacle removal, the upgrade panel's speed-up/cancel
-controls, progress bars and toasts, shop categories, and the Keep 2 end-to-end run. See the Gate C
+persists locally in IndexedDB with autosave, explicit schema versioning and safe restoration, and
+an existing building can be moved. What remains is drag-to-place walls, obstacle removal, the
+upgrade panel's speed-up/cancel controls, progress bars and toasts, shop categories, and the
+Keep 2 end-to-end run. See the Gate C
 checklist in [`PROGRESS.md`](../PROGRESS.md).
 
 Because branch state changes over time, verify the current GitHub state before acting on these notes.
@@ -60,7 +61,10 @@ The order in `docs/GAME_SPEC.md` is sensible. Preserve the offline single-player
   `pnpm test:e2e` runs it in CI on Chromium with a mocked clock.
 - ~~Save locally in IndexedDB and restore the village after a reload.~~ Done:
   `apps/client/src/persistence/`, covered by unit tests and a browser reload test.
-- Next: move mode, obstacle removal, and the speed-up/cancel controls the upgrade panel lacks.
+- ~~Add move mode for existing buildings.~~ Done: `villageMove.ts` plus a browser journey that
+  moves a starter building and checks it after a reload.
+- Next: obstacle removal, drag-to-place walls, and the speed-up/cancel controls the upgrade panel
+  lacks.
 - Configure `main` to require the relevant CI checks and disallow force-pushes where repository settings permit it.
 - Keep the working tree clean and ensure secrets, local databases, and generated build output are not committed.
 

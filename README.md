@@ -10,8 +10,9 @@ all names, art direction and numbers here are ours.
 
 > **Status:** Phases 0–2 complete (tooling, sim-core foundations, economy and construction).
 > **Phase 3 — village scene and building UX — is in progress.** Rendering, selection, the build
-> shop, placement, collection, upgrades and local IndexedDB persistence work in the browser;
-> move controls, obstacle removal and the remaining upgrade-panel controls are still outstanding.
+> shop, placement, moving an existing building, collection, upgrades and local IndexedDB
+> persistence work in the browser; obstacle removal, drag-to-place walls and the remaining
+> upgrade-panel controls are still outstanding.
 > Current milestone: **M1 — offline single-player**.
 
 ## Quick start
@@ -26,7 +27,8 @@ isometric grid: the dark outer band is the 4-tile decorative margin, the lighter
 square is the 40×40 buildable area.
 
 **Controls:** drag to pan · scroll or pinch to zoom · arrow keys to pan ·
-`+` / `-` to zoom · `0` to recentre · click a tile to inspect it.
+`+` / `-` to zoom · `0` to recentre · click a tile to inspect it · select a
+building and press **Move** to rearrange it (Escape or **Cancel** aborts).
 
 ## Commands
 

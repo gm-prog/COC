@@ -1,4 +1,4 @@
-import { t, type TranslationKey } from './i18n';
+import { t, type TranslationKey, type TranslationParams } from './i18n';
 import {
   formatRemainingDuration,
   type VillageHudSnapshot,
@@ -8,6 +8,9 @@ import type { BuildingLevel, ResourceId } from '@coc/sim-core';
 import type { BuildingUpgradeSnapshot } from './villageUpgrade';
 import type { SaveProblemCode } from './persistence/villageSave';
 import type { SaveStatus } from './persistence/autosave';
+
+/** Banner feedback shared by placement and move mode. */
+export type BannerFeedback = 'none' | 'valid' | 'invalid' | 'outside';
 
 /**
  * Everything the save indicator can show.
@@ -85,6 +88,7 @@ export class Hud {
   private onCancelPlacement: (() => void) | null = null;
   private onCollectResource: ((buildingId: number) => void) | null = null;
   private onStartUpgrade: ((buildingId: number) => void) | null = null;
+  private onMoveBuilding: ((buildingId: number) => void) | null = null;
 
   private readonly handleHudClick = (event: MouseEvent): void => {
     if (!(event.target instanceof Element)) return;
@@ -114,6 +118,11 @@ export class Hud {
       if (Number.isInteger(buildingId) && buildingId > 0) {
         this.onStartUpgrade?.(buildingId);
       }
+    } else if (action === 'move-building') {
+      const buildingId = Number(actionElement.dataset.buildingId);
+      if (Number.isInteger(buildingId) && buildingId > 0) {
+        this.onMoveBuilding?.(buildingId);
+      }
     }
   };
 
@@ -128,14 +137,20 @@ export class Hud {
 
   setShopHandlers(handlers: {
     onSelectBuilding: (buildingType: string) => void;
+    /**
+     * Cancels whichever map mode is open. The banner is shared by placement and
+     * move mode, so one hook covers both rather than leaving a stale target.
+     */
     onCancelPlacement: () => void;
     onCollectResource: (buildingId: number) => void;
     onStartUpgrade: (buildingId: number) => void;
+    onMoveBuilding: (buildingId: number) => void;
   }): void {
     this.onSelectBuilding = handlers.onSelectBuilding;
     this.onCancelPlacement = handlers.onCancelPlacement;
     this.onCollectResource = handlers.onCollectResource;
     this.onStartUpgrade = handlers.onStartUpgrade;
+    this.onMoveBuilding = handlers.onMoveBuilding;
   }
 
   isShopOpen(): boolean {
@@ -222,32 +237,53 @@ export class Hud {
   }
 
   setPlacementMode(buildingType: string | null): void {
-    const banner = this.el('placement-banner');
-    if (!banner) return;
-    banner.hidden = buildingType === null;
-    this.text('hud-hint', buildingType === null ? t('hud.hint') : '');
-    if (buildingType !== null) {
-      const buildingKey = 'building.' + buildingType;
-      const building = t(buildingKey as TranslationKey);
-      this.text('placement-title', t('placement.title', { building }));
-      this.setPlacementFeedback('none');
-    }
+    this.showBanner(
+      buildingType === null
+        ? null
+        : t('placement.title', { building: t(('building.' + buildingType) as TranslationKey) }),
+    );
+    if (buildingType !== null) this.setPlacementFeedback('none');
   }
 
-  setPlacementFeedback(state: 'none' | 'valid' | 'invalid' | 'outside'): void {
+  /**
+   * Shows the same banner for Move Mode, with the selected building named and
+   * the shared Cancel button cancelling whichever mode is open.
+   */
+  setMoveMode(buildingType: string | null): void {
+    this.showBanner(
+      buildingType === null
+        ? null
+        : t('move.title', { building: t(('building.' + buildingType) as TranslationKey) }),
+    );
+    if (buildingType !== null) this.setMoveFeedback('none');
+  }
+
+  setPlacementFeedback(state: BannerFeedback): void {
+    this.setBannerFeedback('placement', state);
+  }
+
+  setMoveFeedback(state: BannerFeedback): void {
+    this.setBannerFeedback('move', state);
+  }
+
+  private showBanner(title: string | null): void {
+    const banner = this.el('placement-banner');
+    if (!banner) return;
+    banner.hidden = title === null;
+    this.text('hud-hint', title === null ? t('hud.hint') : '');
+    if (title !== null) this.text('placement-title', title);
+  }
+
+  private setBannerFeedback(kind: 'placement' | 'move', state: BannerFeedback): void {
     const banner = this.el('placement-banner');
     if (banner) {
       banner.classList.remove('placement-banner--valid', 'placement-banner--invalid');
       if (state === 'valid') banner.classList.add('placement-banner--valid');
       if (state === 'invalid') banner.classList.add('placement-banner--invalid');
     }
-    const key = {
-      none: 'placement.instructions',
-      valid: 'placement.valid',
-      invalid: 'placement.invalid',
-      outside: 'placement.outside',
-    }[state] as TranslationKey;
-    this.text('placement-feedback', t(key));
+    // `none` is the standing instruction for the mode; the others are results.
+    const suffix = state === 'none' ? 'instructions' : state;
+    this.text('placement-feedback', t(`${kind}.${suffix}` as TranslationKey));
   }
 
   private el(id: string): HTMLElement | null {
@@ -279,8 +315,8 @@ export class Hud {
    * Defaults to the standing hint; a caller that just refused an action passes
    * the reason so the refusal is explained where the player is looking.
    */
-  setHint(key: TranslationKey = 'hud.hint'): void {
-    this.text('hud-hint', t(key));
+  setHint(key: TranslationKey = 'hud.hint', params?: TranslationParams): void {
+    this.text('hud-hint', t(key, params));
   }
 
   setFps(fps: number): void {
@@ -442,6 +478,11 @@ export class Hud {
     const panel = this.el('selection-panel');
     if (!panel) return;
 
+    // Updated before the early return, so hiding the panel also retires the
+    // action: a hidden button must not keep a stale building id that a stray
+    // click could still dispatch.
+    this.setMoveAction(details);
+
     if (!details) {
       panel.hidden = true;
       return;
@@ -496,6 +537,38 @@ export class Hud {
       details.kind === 'building' ? details.upgrade : undefined,
       details.entityId,
     );
+  }
+
+  /**
+   * Shows the Move action for a building, and only for a building.
+   *
+   * Obstacles have no move command in the spec, so the button is hidden rather
+   * than disabled into a dead end. The entity id is dropped whenever the action
+   * is hidden, so the DOM can never carry a target the player cannot see.
+   */
+  private setMoveAction(
+    details: {
+      kind: 'building' | 'obstacle';
+      id: string;
+      entityId?: number;
+    } | null,
+  ): void {
+    const moveButton = this.el('selection-move') as HTMLButtonElement | null;
+    if (!moveButton) return;
+
+    const movable = details?.kind === 'building' && details.entityId !== undefined;
+    moveButton.hidden = !movable;
+    moveButton.disabled = !movable;
+
+    if (!movable || details === null || details.entityId === undefined) {
+      delete moveButton.dataset.buildingId;
+      return;
+    }
+
+    const buildingName = t(`${details.kind}.${details.id}` as TranslationKey);
+    moveButton.dataset.buildingId = String(details.entityId);
+    moveButton.textContent = t('selection.move');
+    moveButton.setAttribute('aria-label', t('selection.moveNamed', { building: buildingName }));
   }
 
   private setUpgradePanel(snapshot: BuildingUpgradeSnapshot | undefined, buildingId?: number): void {
