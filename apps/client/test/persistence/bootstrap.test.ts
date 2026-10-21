@@ -52,10 +52,7 @@ class MemoryStorage implements VillageStorage {
   async write(save: VillageSave, expectedRevision: number): Promise<VillageWriteResult> {
     this.expectations.push(expectedRevision);
     if (this.failWrite) throw this.failWrite;
-    const stored =
-      this.record === undefined
-        ? 0
-        : storedRevisionOf(this.record);
+    const stored = this.record === undefined ? 0 : storedRevisionOf(this.record);
     if (stored === undefined) return { ok: false, reason: 'unreadable_record' };
     if (stored !== expectedRevision) {
       return { ok: false, reason: 'conflict', storedRevision: stored };
@@ -860,7 +857,9 @@ describe('sparse and unreachable records through the real load path', () => {
     expect(village.problem?.message).toContain('hole at index 0');
     expect(village.autosave).toBeNull();
     // Playable in memory, and the hole is not "repaired" into the running state.
-    expect(village.state.buildings).toHaveLength(createNewPlayerState(GAME_CONFIG, START).buildings.length);
+    expect(village.state.buildings).toHaveLength(
+      createNewPlayerState(GAME_CONFIG, START).buildings.length,
+    );
 
     // The bad record is exactly where the player left it.
     expect(await readRawRecord(factory)).toEqual(storedBefore);

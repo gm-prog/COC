@@ -262,8 +262,7 @@ export class IndexedDbVillageStorage implements VillageStorage {
 
       current.onsuccess = () => {
         const existing = current.result as unknown;
-        const storedRevision =
-          existing === undefined ? 0 : storedRevisionOf(existing);
+        const storedRevision = existing === undefined ? 0 : storedRevisionOf(existing);
 
         if (storedRevision === undefined) {
           // Something is stored that this build cannot interpret. Overwriting it
@@ -794,7 +793,11 @@ function validateBuildings(
 
         // A completed level must clear its own Keep requirement. Level 0 has no
         // row of its own: it is a reservation, gated on the target level below.
-        if (levelDef !== undefined && keepLevel !== undefined && levelDef.requiresKeep > keepLevel) {
+        if (
+          levelDef !== undefined &&
+          keepLevel !== undefined &&
+          levelDef.requiresKeep > keepLevel
+        ) {
           problems.push(
             `${at} is at level ${levelDef.level}, which needs Keep ${levelDef.requiresKeep} but state.keepLevel is ${keepLevel}`,
           );

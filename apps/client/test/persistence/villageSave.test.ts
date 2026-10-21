@@ -720,9 +720,7 @@ describe('sparse arrays are rejected', () => {
 
   it('rejects a hole in trainingQueues', () => {
     const broken = structuredCopy(state);
-    broken.trainingQueues = [
-      { barracksId: broken.buildings[0]!.id, items: [] },
-    ];
+    broken.trainingQueues = [{ barracksId: broken.buildings[0]!.id, items: [] }];
     punchHole(broken.trainingQueues, 0);
     expect(validatePersistedState(broken, GAME_CONFIG).join('; ')).toContain(
       'state.trainingQueues has a hole at index 0',
@@ -842,13 +840,55 @@ describe('safe integers and domain bounds', () => {
 
   it('rejects unsafe timestamps, balances and counters', () => {
     const cases: Array<[string, (state: PlayerState) => void, string]> = [
-      ['lastSyncAt', (value) => { value.lastSyncAt = UNSAFE; }, 'state.lastSyncAt'],
-      ['trophies', (value) => { value.trophies = UNSAFE; }, 'state.trophies'],
-      ['tutorialStep', (value) => { value.tutorialStep = UNSAFE; }, 'state.tutorialStep'],
-      ['resources.gold', (value) => { value.resources.gold = UNSAFE; }, 'state.resources.gold'],
-      ['army', (value) => { value.army = { barbarian: UNSAFE }; }, 'state.army.barbarian'],
-      ['spells', (value) => { value.spells = { rage: UNSAFE }; }, 'state.spells.rage'],
-      ['research', (value) => { value.research = { levels: { barbarian: UNSAFE } }; }, 'state.research.levels'],
+      [
+        'lastSyncAt',
+        (value) => {
+          value.lastSyncAt = UNSAFE;
+        },
+        'state.lastSyncAt',
+      ],
+      [
+        'trophies',
+        (value) => {
+          value.trophies = UNSAFE;
+        },
+        'state.trophies',
+      ],
+      [
+        'tutorialStep',
+        (value) => {
+          value.tutorialStep = UNSAFE;
+        },
+        'state.tutorialStep',
+      ],
+      [
+        'resources.gold',
+        (value) => {
+          value.resources.gold = UNSAFE;
+        },
+        'state.resources.gold',
+      ],
+      [
+        'army',
+        (value) => {
+          value.army = { barbarian: UNSAFE };
+        },
+        'state.army.barbarian',
+      ],
+      [
+        'spells',
+        (value) => {
+          value.spells = { rage: UNSAFE };
+        },
+        'state.spells.rage',
+      ],
+      [
+        'research',
+        (value) => {
+          value.research = { levels: { barbarian: UNSAFE } };
+        },
+        'state.research.levels',
+      ],
     ];
 
     for (const [label, corrupt, expected] of cases) {
@@ -867,17 +907,13 @@ describe('safe integers and domain bounds', () => {
 
   it('rejects unsafe scheduled times and buffer amounts', () => {
     const upgrade = withUpgrade(structuredCopy(freshState()), UNSAFE);
-    expect(validatePersistedState(upgrade, GAME_CONFIG).join('; ')).toContain(
-      'upgrade.finishAt',
-    );
+    expect(validatePersistedState(upgrade, GAME_CONFIG).join('; ')).toContain('upgrade.finishAt');
 
     const producing = catchUpTo(withGoldMine(freshState()), START + 30_000);
     const mine = producing.buildings.find((building) => building.type === 'gold_mine')!;
     expect(mine.buffer).toBeDefined();
     mine.buffer!.amount = UNSAFE;
-    expect(validatePersistedState(producing, GAME_CONFIG).join('; ')).toContain(
-      'buffer.amount',
-    );
+    expect(validatePersistedState(producing, GAME_CONFIG).join('; ')).toContain('buffer.amount');
   });
 
   it('keeps accepting ordinary and maximum-supported values', () => {

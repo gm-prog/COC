@@ -156,7 +156,12 @@ describe('single-writer concurrency', () => {
     const factory = (first as unknown as { factory: IDBFactory }).factory;
 
     for (let revision = 1; revision <= 5; revision += 1) {
-      const save = createSave(freshState(revision), GAME_CONFIG.version, START + revision, revision);
+      const save = createSave(
+        freshState(revision),
+        GAME_CONFIG.version,
+        START + revision,
+        revision,
+      );
       expect(await first.write(save, revision - 1)).toEqual({ ok: true, revision });
     }
 

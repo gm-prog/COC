@@ -593,10 +593,6 @@ function footprint(def: BuildingDef, x: number, y: number): Rect {
  * config's limit table. Returns undefined when the table has no row, which the
  * validator rejects up front; treating a missing row as unlimited here keeps
  * the command path total rather than throwing on malformed input.
- */
-/**
- * The quantity ceiling for `buildingType` at `keepLevel`, or `undefined` when
- * the config sets no limit.
  *
  * Exported so the persistence validator can enforce the same ceiling instead of
  * re-deriving the indexing rule (including the clamp at the table's end).

@@ -262,12 +262,7 @@ export class VillageAutosave {
           const state = this.pending;
           this.pending = undefined;
           const expectedRevision = this.baseRevision;
-          const save = createSave(
-            state,
-            this.configVersion,
-            this.now(),
-            expectedRevision + 1,
-          );
+          const save = createSave(state, this.configVersion, this.now(), expectedRevision + 1);
 
           try {
             const outcome = await this.storage.write(save, expectedRevision);
