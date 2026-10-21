@@ -12,7 +12,7 @@ import { GRID } from '../packages/sim-core/src/config/geometry';
 import { tileCenterToPage } from '../e2e/support/villageGeometry';
 
 /**
- * Browser-free guards for `e2e/phase3-village.spec.ts`.
+ * Browser-free guards for the `e2e/*.spec.ts` suites.
  *
  * The Playwright suite needs a Chromium binary, which some environments cannot
  * provide (CI installs one; a locked-down sandbox may not). These tests cover
@@ -27,6 +27,9 @@ import { tileCenterToPage } from '../e2e/support/villageGeometry';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const read = (relative: string): string => readFileSync(`${repoRoot}${relative}`, 'utf8');
+
+/** Every browser spec, so a new one cannot escape the contract checks below. */
+const SPEC_FILES = ['e2e/phase3-village.spec.ts', 'e2e/phase3-move-mode.spec.ts'];
 
 /** The fixed viewport from `playwright.config.ts`. */
 const VIEWPORT = { width: 1280, height: 800 };
@@ -92,7 +95,7 @@ describe('browser test geometry: tile centres on the canvas', () => {
 });
 
 describe('browser test contract: DOM hooks and copy', () => {
-  const spec = read('e2e/phase3-village.spec.ts');
+  const spec = SPEC_FILES.map(read).join('\n');
   const html = read('apps/client/index.html');
   const hudSource = read('apps/client/src/hud.ts');
 
@@ -105,6 +108,11 @@ describe('browser test contract: DOM hooks and copy', () => {
     // Guards the extractors above: an empty set would make the checks vacuous.
     expect(specIds.size).toBeGreaterThanOrEqual(15);
     expect(specTestIds.size).toBeGreaterThanOrEqual(5);
+    // The move spec really is in the set, not silently missing: it is the only
+    // one that presses the banner's Cancel button and the selection panel's
+    // Move action.
+    expect(specIds).toContain('placement-cancel');
+    expect(specTestIds).toContain('selection-move');
   });
 
   it('references only ids that exist in index.html', () => {
@@ -152,5 +160,19 @@ describe('browser test contract: DOM hooks and copy', () => {
     expect(t('upgrade.keepLevel', { level: 2 })).toBe('Requires Keep level 2');
     expect(t('builders.available', { available: 2, total: 2 })).toBe('2 / 2 available');
     expect(t('resource.amountCapacity', { amount: 1000, capacity: 1000 })).toBe('1000 / 1000');
+    // Move Mode (e2e/phase3-move-mode.spec.ts), which moves the starter well.
+    expect(t('building.essence_well')).toBe('Essence Well');
+    expect(t('selection.move')).toBe('Move');
+    expect(t('selection.moveNamed', { building: t('building.essence_well') })).toBe(
+      'Move Essence Well',
+    );
+    expect(t('move.title', { building: t('building.essence_well') })).toBe('Move Essence Well');
+    expect(t('move.instructions')).toBe('Tap a buildable tile to place this building there.');
+    expect(t('move.valid')).toBe('Valid destination — tap to move');
+    expect(t('move.invalid')).toBe('Blocked — choose an empty buildable tile');
+    expect(t('move.done', { building: t('building.essence_well'), x: 24, y: 24 })).toBe(
+      'Moved Essence Well to 24, 24.',
+    );
+    expect(t('move.noop')).toBe('That building is already there. Pick a different tile or cancel.');
   });
 });
