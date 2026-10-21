@@ -15,9 +15,9 @@ import { canvasBox, tileCenterToPage, type Tile } from './support/villageGeometr
  * `page.clock.install()` replaces `Date`, `performance`, `setTimeout` and
  * `requestAnimationFrame` before the first script runs, so the scene seeds its
  * economy from a reproducible `Date.now()` and Phaser's animation loop is driven
- * by the same fake clock. After `install` the clock runs in real time (so the
- * game animates and input is processed normally); `runFor(ms)` then jumps it
- * forward, firing every timer and animation frame on the way.
+ * by the same fake clock. After `install` the clock runs in real time, so the
+ * game animates and input is processed normally; the test then jumps it forward
+ * (see `advance`) rather than sleeping.
  *
  * Between the jumps the test calls `freezeClock()`. That pins the clock at the
  * current instant so no simulated time leaks in while assertions run: the
@@ -46,6 +46,13 @@ const FREEZE_MARGIN_MS = 2_000;
 const FRAME_MS = 120;
 
 /**
+ * Virtual milliseconds of frame time spent after each jump: enough to carry the
+ * scene's one-second `catchUp` accumulator past its threshold exactly once, and
+ * too little to reach it twice.
+ */
+const HUD_TICK_MS = 1_100;
+
+/**
  * Pins the clock at "now + a small margin".
  *
  * `pauseAt` fast-forwards to the target and then stops time; the margin absorbs
@@ -55,6 +62,28 @@ const FRAME_MS = 120;
 async function freezeClock(page: Page): Promise<void> {
   const now = await page.evaluate(() => Date.now());
   await page.clock.pauseAt(new Date(now + FREEZE_MARGIN_MS));
+}
+
+/**
+ * Advances the clock by `ms` of simulated time.
+ *
+ * The jump itself is a `fastForward`: it moves `Date` and fires each pending
+ * timer once. That is all the economy needs, because `catchUp(state, now)`
+ * accrues from timestamps — it walks completions in chronological order and
+ * carries the fractional production remainder as an exact numerator, so one
+ * catch-up spanning a minute yields precisely what sixty one-second catch-ups
+ * would. Driving the whole minute through `runFor` instead would paint every
+ * animation frame in it (thousands), and a frame costs tens of milliseconds on
+ * CI's software renderer.
+ *
+ * The short `runFor` afterwards spends frames only where they buy something:
+ * it carries the scene's one-second HUD tick past its threshold, which is what
+ * repaints the resource panel, the countdowns and the selected building's
+ * buffer from the caught-up state.
+ */
+async function advance(page: Page, ms: number): Promise<void> {
+  await page.clock.fastForward(ms);
+  await page.clock.runFor(HUD_TICK_MS);
 }
 
 /**
@@ -139,7 +168,7 @@ test('a new village can place a Gold Mine, collect its gold and start an upgrade
   await expect(page.locator('#builder-countdowns')).toContainText('Gold Mine');
 
   // 4. Construction finishes on simulated time alone.
-  await page.clock.runFor(CONSTRUCTION_MS);
+  await advance(page, CONSTRUCTION_MS);
   await freezeClock(page);
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
   await expect(page.locator('#builder-countdowns')).toBeHidden();
@@ -157,7 +186,7 @@ test('a new village can place a Gold Mine, collect its gold and start an upgrade
   await expect(collectButton).toBeDisabled();
 
   // 6. Let the collector fill its buffer.
-  await page.clock.runFor(PRODUCTION_MS);
+  await advance(page, PRODUCTION_MS);
   await freezeClock(page);
   await expect(page.locator('#selection-buffer')).toHaveText('Stored: 4 Gold');
   await expect(collectButton).toBeEnabled();
@@ -190,7 +219,7 @@ test('a new village can place a Gold Mine, collect its gold and start an upgrade
 
   // 9. The upgrade completes on schedule and the builder is released. The next
   //    level needs Keep 2, so the panel reports the gate rather than a price.
-  await page.clock.runFor(UPGRADE_MS);
+  await advance(page, UPGRADE_MS);
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
   await expect(page.locator('#selection-meta')).toContainText('Level 2');
   await expect(page.locator('#selection-upgrade-title')).toHaveText('Next: level 3');
