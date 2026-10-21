@@ -29,7 +29,11 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const read = (relative: string): string => readFileSync(`${repoRoot}${relative}`, 'utf8');
 
 /** Every browser spec, so a new one cannot escape the contract checks below. */
-const SPEC_FILES = ['e2e/phase3-village.spec.ts', 'e2e/phase3-move-mode.spec.ts'];
+const SPEC_FILES = [
+  'e2e/phase3-village.spec.ts',
+  'e2e/phase3-move-mode.spec.ts',
+  'e2e/phase3-obstacle-removal.spec.ts',
+];
 
 /** The fixed viewport from `playwright.config.ts`. */
 const VIEWPORT = { width: 1280, height: 800 };
@@ -77,6 +81,17 @@ describe('browser test geometry: tile centres on the canvas', () => {
     }
   });
 
+  it('keeps the obstacle the browser test clears clear of the HUD chrome', () => {
+    // The obstacle spec taps the starter rock at (6, 20). The top-left overlay
+    // holds the title badge and the Build button, the only interactive elements
+    // up there; the tile centre has to land below and clear of them.
+    const point = tileCenterToPage(canvas, { x: 6, y: 20 });
+    expect(point.x).toBeGreaterThan(180);
+    expect(point.y).toBeGreaterThan(48);
+    expect(point.x).toBeLessThan(VIEWPORT.width - 12);
+    expect(point.y).toBeLessThan(VIEWPORT.height - 12);
+  });
+
   it('keeps the placement tile and its neighbours on screen', () => {
     // The tile the smoke test clicks, plus the 3×3 footprint it occupies, must
     // be inside the viewport and clear of the HUD panels. The HUD lives at the
@@ -113,6 +128,9 @@ describe('browser test contract: DOM hooks and copy', () => {
     // Move action.
     expect(specIds).toContain('placement-cancel');
     expect(specTestIds).toContain('selection-move');
+    // And the obstacle spec: it is the only one that reads the reward preview.
+    expect(specIds).toContain('selection-reward');
+    expect(specTestIds).toContain('selection-remove');
   });
 
   it('references only ids that exist in index.html', () => {
@@ -174,5 +192,19 @@ describe('browser test contract: DOM hooks and copy', () => {
       'Moved Essence Well to 24, 24.',
     );
     expect(t('move.noop')).toBe('That building is already there. Pick a different tile or cancel.');
+    // Obstacle removal (e2e/phase3-obstacle-removal.spec.ts), which clears the
+    // starter rock at (6, 20) while Gold is at its cap.
+    expect(t('obstacle.rock')).toBe('Rock');
+    expect(t('selection.remove')).toBe('Remove');
+    expect(t('selection.removeNamed', { obstacle: t('obstacle.rock') })).toBe('Remove Rock');
+    expect(t('obstacle.rewardCapped', { reward: '30 Gold · 1 Gems' })).toBe(
+      'Reward: 30 Gold · 1 Gems · overflow is lost when storage is full',
+    );
+    expect(
+      t('obstacle.removedPartial', { obstacle: 'Rock', credited: '1 Gems', lost: '30 Gold' }),
+    ).toBe('Rock cleared: 1 Gems; 30 Gold was lost to storage.');
+    expect(t('obstacle.removedNothing', { obstacle: 'Rock', lost: '30 Gold' })).toBe(
+      'Rock cleared, but nothing fit in storage — 30 Gold was lost.',
+    );
   });
 });
