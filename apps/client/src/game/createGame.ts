@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import type { VillageBootstrap } from '../persistence/bootstrap';
 import { BootScene } from '../scenes/BootScene';
 
 /**
@@ -6,8 +7,11 @@ import { BootScene } from '../scenes/BootScene';
  *
  * Scale.RESIZE keeps the canvas filling its parent, which is what the browser
  * preview and the mobile web view need; Capacitor gets the same behaviour.
+ *
+ * `village` is the already-resolved starting state. The scene is handed the
+ * finished object, so nothing in the game can observe a placeholder village.
  */
-export function createGame(parent: HTMLElement): Phaser.Game {
+export function createGame(parent: HTMLElement, village: VillageBootstrap): Phaser.Game {
   return new Phaser.Game({
     type: Phaser.AUTO,
     parent,
@@ -24,7 +28,7 @@ export function createGame(parent: HTMLElement): Phaser.Game {
       powerPreference: 'high-performance',
       roundPixels: false,
     },
-    scene: [BootScene],
+    scene: [new BootScene(village)],
     // Phaser's banner is noise in the console during CI/dev.
     banner: false,
     audio: { noAudio: true },

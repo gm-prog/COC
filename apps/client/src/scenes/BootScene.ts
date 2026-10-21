@@ -3,9 +3,7 @@ import { GAME_CONFIG } from '@coc/game-data';
 import { CONFIG_VERSION } from '@coc/game-data/version';
 import { PROTOCOL_VERSION } from '@coc/protocol';
 import {
-  applyCommand,
   catchUp,
-  createNewPlayerState,
   GRID,
   SIM_CORE_VERSION,
   type BuildingCategory,
@@ -28,6 +26,10 @@ import { buildVillageHudSnapshot } from '../villageHud';
 import { previewBuildingPlacement } from '../villagePlacement';
 import { listBuildingShopItems } from '../villageShop';
 import { getBuildingUpgradeSnapshot } from '../villageUpgrade';
+import { readOnlyHintFor, saveIndicatorForProblem } from '../hud';
+import { isReadOnlyVillage, runVillageAction } from '../villageActions';
+import type { VillageAutosave } from '../persistence/autosave';
+import type { VillageBootstrap } from '../persistence/bootstrap';
 import {
   findVillageEntityAtTile,
   listVillageEntities,
@@ -131,8 +133,50 @@ export class BootScene extends Phaser.Scene {
   private fpsFrames = 0;
   private villageHudElapsed = 0;
 
-  constructor() {
+  private readonly village: VillageBootstrap;
+  private autosave: VillageAutosave | null = null;
+
+  /**
+   * True when saving is off because the device clock is behind the save.
+   *
+   * The village on screen is a real record that cannot be written back, so every
+   * command is refused: anything the player did here would be silently lost on
+   * reload. Viewing, selection, panning and zooming stay available.
+   */
+  private readOnly: boolean;
+
+  /**
+   * The hint that explains the current read-only state.
+   *
+   * A refused command must repeat the reason the session stopped saving, not a
+   * fixed one: telling a player whose other tab won that their clock is behind
+   * sends them to fix something that is not wrong, and hides the remedy that
+   * would actually work (reload from the newer save).
+   */
+  private readOnlyHintKey: TranslationKey = readOnlyHintFor('clock_behind');
+
+  /**
+   * Best-effort flush when the page is being hidden.
+   *
+   * This is a belt to the autosave's braces, not the durability mechanism: a
+   * mobile browser may kill a backgrounded page without ever firing these.
+   * Progress is already written by the debounced autosave after each command.
+   */
+  private readonly flushOnHide = (): void => {
+    void this.autosave?.flush();
+  };
+
+  private readonly onVisibilityChange = (): void => {
+    if (document.visibilityState === 'hidden') this.flushOnHide();
+  };
+
+  constructor(village: VillageBootstrap) {
     super({ key: BootScene.KEY });
+    this.village = village;
+    this.readOnly = isReadOnlyVillage(village.problem);
+    if (this.readOnly && village.problem !== null) {
+      this.readOnlyHintKey = readOnlyHintFor(saveIndicatorForProblem(village.problem.code));
+    }
   }
 
   create(): void {
@@ -166,11 +210,37 @@ export class BootScene extends Phaser.Scene {
       this.placementLayer,
     ]);
 
-    // Offline client state starts at the real local timestamp; this prevents the
-    // first command from accruing resources since the Unix epoch.
-    this.playerState = createNewPlayerState(GAME_CONFIG, Date.now());
+    // The village was resolved before the game was constructed (see
+    // `persistence/bootstrap.ts`): either a save reconciled to now, or a fresh
+    // configured starter. The scene never decides this itself.
+    this.playerState = this.village.state;
+    this.autosave = this.village.autosave;
+    this.hud.setSaveIndicator(
+      this.village.problem === null ? 'idle' : saveIndicatorForProblem(this.village.problem.code),
+    );
+    if (this.autosave) {
+      this.autosave.setOnStatus((status) => {
+        // A conflict is not a transient status: another tab owns a newer
+        // record, so this session must stop pretending its changes are durable.
+        if (status === 'conflict') {
+          this.enterReadOnly('conflict');
+          return;
+        }
+        this.hud.setSaveIndicator(status);
+      });
+      // A runtime write failure (quota, revoked permission) is surfaced here;
+      // the game keeps running in memory either way.
+      this.autosave.setOnError(() => this.hud.setSaveIndicator('blocked'));
+      this.autosave.setOnConflict(() => this.enterReadOnly('conflict'));
+      window.addEventListener('pagehide', this.flushOnHide);
+      document.addEventListener('visibilitychange', this.onVisibilityChange);
+      // A first-time player has a village worth keeping: persist the starter
+      // immediately. Only reachable when the store was readable and empty.
+      if (this.village.source === 'new') this.persist();
+    }
+
     this.hud.setVillageSnapshot(
-      buildVillageHudSnapshot(this.playerState, GAME_CONFIG, Date.now()),
+      buildVillageHudSnapshot(this.playerState, GAME_CONFIG, this.getNow()),
     );
     this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
     this.drawStaticGrid();
@@ -180,6 +250,50 @@ export class BootScene extends Phaser.Scene {
 
     this.setupInput();
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.teardownInput, this);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.teardownPersistence, this);
+  }
+
+  /**
+   * Switches the live session to read-only after it has already started.
+   *
+   * Used for a write conflict discovered mid-session: saving is refused from
+   * that moment, so continuing to accept commands would manufacture progress
+   * that can never be stored. Placement mode is cancelled and the hint explains
+   * the remedy (reload), matching the startup read-only states.
+   */
+  private enterReadOnly(indicator: 'conflict'): void {
+    const hintKey = readOnlyHintFor(indicator);
+    if (this.readOnly) {
+      this.readOnlyHintKey = hintKey;
+      this.hud.setSaveIndicator(indicator);
+      return;
+    }
+    this.readOnly = true;
+    this.readOnlyHintKey = hintKey;
+    if (this.placementType !== null) this.cancelPlacement();
+    this.hud.setSaveIndicator(indicator);
+    this.hud.setHint(hintKey);
+  }
+
+  private teardownPersistence(): void {
+    window.removeEventListener('pagehide', this.flushOnHide);
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    this.autosave?.dispose();
+  }
+
+  /**
+   * Queues the current village for saving.
+   *
+   * Called after accepted commands and after catch-up reports completions.
+   * Production that merely accrues is *not* saved: `buffer.lastAccruedAt` plus
+   * the exact remainder make it derivable, so a reload recomputes exactly the
+   * gold the village earned — no duplicated reward, no lost one.
+   */
+  private persist(): void {
+    // Belt to the braces: `autosave` is already `null` in a read-only session,
+    // so this only documents the intent and survives a future refactor.
+    if (this.readOnly) return;
+    this.autosave?.schedule(this.playerState);
   }
 
   // ---------------------------------------------------------------- rendering
@@ -559,7 +673,13 @@ export class BootScene extends Phaser.Scene {
     this.hud.setTile(tile.x, tile.y);
     this.hud.setZone(this.isBuildable(tile));
     const entity = this.selectedEntity;
-    if (entity?.kind === 'building' && (entity.instance.buffer?.amount ?? 0) > 0) {
+    // A tap on a producing building collects. Read-only sessions still select
+    // it — viewing is allowed — but the click must not mutate anything.
+    if (
+      !this.readOnly &&
+      entity?.kind === 'building' &&
+      (entity.instance.buffer?.amount ?? 0) > 0
+    ) {
       this.collectResourceFromBuilding(entity.instance.id);
       return;
     }
@@ -620,19 +740,23 @@ export class BootScene extends Phaser.Scene {
     if (!entity || entity.kind !== 'building') return;
 
     const now = this.getNow();
-    const result = applyCommand(
+    const result = runVillageAction(
       this.playerState,
       {
         id: 'collect-' + now + '-' + buildingId,
         type: 'CollectResource',
         payload: { buildingId },
       },
-      { config: GAME_CONFIG, now },
+      { config: GAME_CONFIG, now, readOnly: this.readOnly },
     );
-    if (!result.ok) return;
+    if (!result.ok) {
+      if (result.reason === 'read_only') this.hud.setHint(this.readOnlyHintKey);
+      return;
+    }
 
     const collection = result.events.find((event) => event.type === 'ResourceCollected');
     this.playerState = result.state;
+    this.persist();
     this.hud.setVillageSnapshot(
       buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
     );
@@ -697,17 +821,18 @@ export class BootScene extends Phaser.Scene {
 
   private startBuildingUpgrade(buildingId: number): void {
     const now = this.getNow();
-    const result = applyCommand(
+    const result = runVillageAction(
       this.playerState,
       {
         id: 'upgrade-' + now + '-' + buildingId,
         type: 'StartUpgrade',
         payload: { buildingId },
       },
-      { config: GAME_CONFIG, now },
+      { config: GAME_CONFIG, now, readOnly: this.readOnly },
     );
 
     if (!result.ok) {
+      if (result.reason === 'read_only') this.hud.setHint(this.readOnlyHintKey);
       this.refreshSelectionAfterCatchUp();
       this.hud.setVillageSnapshot(
         buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
@@ -716,6 +841,7 @@ export class BootScene extends Phaser.Scene {
     }
 
     this.playerState = result.state;
+    this.persist();
     this.hud.setVillageSnapshot(
       buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
     );
@@ -724,6 +850,13 @@ export class BootScene extends Phaser.Scene {
   }
 
   private beginPlacement(buildingType: string): void {
+    // Entering placement mode is harmless on its own, but the ghost would imply
+    // a drop is possible. Refuse up front and say why.
+    if (this.readOnly) {
+      this.hud.setHint(this.readOnlyHintKey);
+      return;
+    }
+
     const item = listBuildingShopItems(this.playerState, GAME_CONFIG).find(
       (candidate) => candidate.id === buildingType,
     );
@@ -787,6 +920,10 @@ export class BootScene extends Phaser.Scene {
   }
 
   private tryPlaceBuildingAt(pointer: Phaser.Input.Pointer): void {
+    // Unreachable while `beginPlacement` refuses, kept as the second gate in
+    // case placement mode is ever entered by another route.
+    if (this.readOnly) return;
+
     const world = this.pointerToWorld(pointer);
     const tile = screenToTileFloor(world.x, world.y);
     if (!this.isInsideMap(tile)) {
@@ -804,21 +941,23 @@ export class BootScene extends Phaser.Scene {
     if (buildingType === null) return;
 
     const now = this.getNow();
-    const result = applyCommand(
+    const result = runVillageAction(
       this.playerState,
       {
         id: 'place-' + now + '-' + buildingType + '-' + tile.x + '-' + tile.y,
         type: 'PlaceBuilding',
         payload: { buildingType, x: tile.x, y: tile.y },
       },
-      { config: GAME_CONFIG, now },
+      { config: GAME_CONFIG, now, readOnly: this.readOnly },
     );
     if (!result.ok) {
-      this.hud.setPlacementFeedback('invalid');
+      if (result.reason === 'read_only') this.hud.setHint(this.readOnlyHintKey);
+      else this.hud.setPlacementFeedback('invalid');
       return;
     }
 
     this.playerState = result.state;
+    this.persist();
     this.selectedEntity = null;
     this.selectedTile = null;
     this.redrawSelection();
@@ -860,6 +999,17 @@ export class BootScene extends Phaser.Scene {
     // explicit timestamp and never read the wall clock themselves.
     if (this.villageHudElapsed >= 1000) {
       const now = this.getNow();
+      if (this.readOnly) {
+        // Time is frozen at the saved watermark. Rebuilding the snapshot keeps
+        // countdowns honest at that instant; running `catchUp` here would be a
+        // mutation the session could never save.
+        this.hud.setVillageSnapshot(
+          buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
+        );
+        this.villageHudElapsed = 0;
+        return;
+      }
+
       const caught = catchUp(this.playerState, now, GAME_CONFIG);
       if (caught.ok) {
         this.playerState = caught.state;
@@ -868,6 +1018,10 @@ export class BootScene extends Phaser.Scene {
         );
 
         if (caught.events.length > 0) {
+          // Constructions and upgrades completed during this window. The
+          // accrual that produced no event is deliberately not saved;
+          // `lastAccruedAt` reproduces it after a reload.
+          this.persist();
           this.drawVillageEntities();
           this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
         }

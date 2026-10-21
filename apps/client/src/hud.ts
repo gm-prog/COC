@@ -6,6 +6,71 @@ import {
 import type { BuildingShopItem } from './villageShop';
 import type { BuildingLevel, ResourceId } from '@coc/sim-core';
 import type { BuildingUpgradeSnapshot } from './villageUpgrade';
+import type { SaveProblemCode } from './persistence/villageSave';
+import type { SaveStatus } from './persistence/autosave';
+
+/**
+ * Everything the save indicator can show.
+ *
+ * The first five are the live autosave status (including a terminal write
+ * conflict); the rest are the reasons saving is switched off for this session.
+ */
+export type SaveIndicator =
+  | SaveStatus
+  | 'unavailable'
+  | 'unreadable'
+  | 'incompatible'
+  | 'clock_behind';
+
+/** Translation key for each indicator state. */
+const SAVE_INDICATOR_KEYS: Record<SaveIndicator, TranslationKey> = {
+  idle: 'save.saved',
+  saving: 'save.saving',
+  saved: 'save.saved',
+  blocked: 'save.blocked',
+  unavailable: 'save.unavailable',
+  unreadable: 'save.unreadable',
+  incompatible: 'save.incompatible',
+  clock_behind: 'save.clockBehind',
+  conflict: 'save.conflict',
+};
+
+/**
+ * The hint that explains *why* a session is read-only.
+ *
+ * The status line and the hint must never disagree: a conflict caused by
+ * another tab has nothing to do with the device clock, and telling the player
+ * to fix the clock hides the one action that recovers their progress — reload.
+ */
+const READ_ONLY_HINT_KEYS: Partial<Record<SaveIndicator, TranslationKey>> = {
+  clock_behind: 'hud.readOnly',
+  conflict: 'hud.conflict',
+};
+
+/** Hint key for a read-only session, keyed by the status it is showing. */
+export function readOnlyHintFor(indicator: SaveIndicator): TranslationKey {
+  return READ_ONLY_HINT_KEYS[indicator] ?? 'hud.readOnly';
+}
+
+/**
+ * Maps a load problem to the indicator that explains it.
+ *
+ * Exported so the scene does not have to know which codes mean "no store" and
+ * which mean "there is a record we refused to touch".
+ */
+export function saveIndicatorForProblem(problem: SaveProblemCode): SaveIndicator {
+  switch (problem) {
+    case 'storage_unavailable':
+      return 'unavailable';
+    case 'incompatible_config':
+      return 'incompatible';
+    case 'malformed':
+    case 'unsupported_schema':
+      return 'unreadable';
+    case 'clock_behind':
+      return 'clock_behind';
+  }
+}
 
 /**
  * Thin wrapper over the DOM debug HUD (index.html).
@@ -208,8 +273,14 @@ export class Hud {
     this.el('shop-close')?.setAttribute('aria-label', t('shop.close'));
   }
 
-  setHint(): void {
-    this.text('hud-hint', t('hud.hint'));
+  /**
+   * Sets the hint line.
+   *
+   * Defaults to the standing hint; a caller that just refused an action passes
+   * the reason so the refusal is explained where the player is looking.
+   */
+  setHint(key: TranslationKey = 'hud.hint'): void {
+    this.text('hud-hint', t(key));
   }
 
   setFps(fps: number): void {
@@ -238,6 +309,29 @@ export class Hud {
 
   setVersions(versions: { protocol: string; simCore: string; config: string }): void {
     this.text('hud-versions', t('hud.versions', versions));
+  }
+
+  /**
+   * Shows the persistence indicator.
+   *
+   * `idle` hides it: a brand-new session with nothing worth saving should not
+   * announce anything. Every other state is real information, so it stays on
+   * screen rather than flashing past.
+   *
+   * Called only when the state actually changes (see `VillageAutosave`), so this
+   * never runs once per frame.
+   */
+  setSaveIndicator(state: SaveIndicator): void {
+    const node = this.el('save-status');
+    if (!node) return;
+    node.dataset.saveState = state;
+    if (state === 'idle') {
+      node.hidden = true;
+      node.textContent = '';
+      return;
+    }
+    node.textContent = t(SAVE_INDICATOR_KEYS[state]);
+    node.hidden = false;
   }
 
   setVillageSnapshot(snapshot: VillageHudSnapshot): void {
