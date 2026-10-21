@@ -89,9 +89,11 @@ The village is stored in IndexedDB — database `emberhold`, object store
   treated as a malformed record, not as an empty slot: only a missing key starts
   a new player.
 - **Clock skew.** If the device clock is behind the saved village's
-  `lastSyncAt`, the saved village is shown as-is with saving switched off and a
-  HUD warning. The record is not rewritten and no timestamps are fabricated;
-  commands resume once the clock catches up.
+  `lastSyncAt`, the session is **read-only**: the saved village is shown as-is,
+  saving is off, and a HUD warning explains that actions are unavailable until
+  the clock is corrected and the game reloaded. Viewing, selection, panning and
+  zooming still work. The record is not rewritten and no timestamps are
+  fabricated to get past the engine's monotonic-time rule.
 
 ## Repository layout
 

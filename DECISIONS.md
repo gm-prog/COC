@@ -546,12 +546,31 @@ buffers against the producing level's cap and the state watermark, and queue/res
 counters. It reuses `sim-core` helpers rather than duplicating the engine, and adds nothing to
 `sim-core` that only a browser needs.
 
-**A clock behind the save disables saving; it does not reset timers.** `restoreVillage` already
-refused to replay time backwards. Bootstrap now makes that a first-class outcome rather than
-papering over it: the saved village is shown as-is, `autosave` is `null`, the record is untouched,
-and the HUD shows a localised warning. Until `Date.now()` passes `lastSyncAt` the engine's
-monotonic-time rule also refuses commands, which is the honest consequence of not fabricating
-timestamps to get past it.
+**A clock behind the save makes the session read-only, not just write-less.** `restoreVillage`
+already refused to replay time backwards, and bootstrap turned that into `autosave: null` plus a
+localised warning. That was not enough: `BootScene.getNow()` clamps `Date.now()` up to
+`lastSyncAt`, so `applyCommand` saw a timestamp that was already reached and happily accepted
+placements, collections and upgrades — mutating a village that could never be written back. The
+player would have "progressed" and lost it on the next reload, which is worse than being stopped.
+
+Every state-changing interaction now goes through `runVillageAction` (`src/villageActions.ts`),
+which refuses outright when the problem is `clock_behind`. `applyCommand` remains the only rules
+engine; this is a gate in front of it, not a copy of it. Deleting the gate makes seven tests fail,
+so it cannot be quietly refactored away. Viewing, selection, panning and zooming are untouched, and
+the warning names the remedy: correct the clock, then reload. `hud.readOnly` repeats that in the
+hint line whenever an action is refused.
+
+**Validation is a boundary, not a trust exercise.** `isKeepLevelConsistent` is a `sim-core` helper
+typed against `PlayerState`; it reads `building.type` without re-checking structure. Calling it on a
+raw, not-yet-validated `buildings` array meant a single `null` entry threw `TypeError` out of
+validation — and because only `storage.read()` was guarded, that surfaced as "storage unavailable".
+The player was told their browser had failed when in fact their record was bad. Two changes: the
+Keep check now runs only when every building entry passed structural validation, and `loadVillage`
+wraps migration + validation so an unexpected throw is reported as `malformed`, which is also what
+the HUD shows. Structural junk is still rejected; genuinely unknown content is still _unknown_, and
+nothing is deleted or overwritten either way. One small inaccuracy was accepted deliberately: an
+entry that is an object with a valid `id` and `type` is treated as structurally sound for the Keep
+check even if other fields are malformed, because the helper only reads those two fields.
 
 `fake-indexeddb` is a client devDependency, added through pnpm. It provides a real IndexedDB
 implementation in Node, so the storage tests exercise transactions, `onupgradeneeded` and
