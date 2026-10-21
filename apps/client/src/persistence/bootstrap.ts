@@ -47,6 +47,13 @@ export interface VillageBootstrap {
    * store — those are the two healthy outcomes.
    */
   problem: SaveProblem | null;
+  /**
+   * Revision the loaded record carried (0 when the store was empty).
+   *
+   * The first write from this session asserts it; if another tab has written
+   * since, the store refuses the write instead of silently replacing it.
+   */
+  revision: number;
 }
 
 export interface BootstrapOptions {
@@ -73,11 +80,12 @@ export async function bootstrapVillage(options: BootstrapOptions): Promise<Villa
   if (loaded.status === 'empty') {
     return {
       state: createNewPlayerState(config, now()),
-      autosave: createAutosave(storage, options),
+      autosave: createAutosave(storage, options, 0),
       source: 'new',
       events: [],
       reconciled: false,
       problem: null,
+      revision: 0,
     };
   }
 
@@ -100,16 +108,18 @@ export async function bootstrapVillage(options: BootstrapOptions): Promise<Villa
           code: 'clock_behind',
           message: `device clock is before the saved village's lastSyncAt (${restored.state.lastSyncAt})`,
         },
+        revision: loaded.save.revision,
       };
     }
 
     return {
       state: restored.state,
-      autosave: createAutosave(storage, options),
+      autosave: createAutosave(storage, options, loaded.save.revision),
       source: 'restored',
       events: restored.events,
       reconciled: restored.reconciled,
       problem: null,
+      revision: loaded.save.revision,
     };
   }
 
@@ -138,13 +148,21 @@ export function unsavedVillage(
     events: [],
     reconciled: false,
     problem,
+    // Nothing was loaded, so no revision is claimed. There is no autosave to
+    // assert one anyway.
+    revision: 0,
   };
 }
 
-function createAutosave(storage: VillageStorage, options: BootstrapOptions): VillageAutosave {
+function createAutosave(
+  storage: VillageStorage,
+  options: BootstrapOptions,
+  baseRevision: number,
+): VillageAutosave {
   return new VillageAutosave(storage, {
     configVersion: options.config.version,
     now: options.now,
+    baseRevision,
     ...(options.debounceMs === undefined ? {} : { debounceMs: options.debounceMs }),
     ...(options.onSaveError === undefined ? {} : { onError: options.onSaveError }),
   });

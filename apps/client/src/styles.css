@@ -126,11 +126,21 @@ body {
   color: var(--muted);
 }
 
+/*
+ * Every state that means "your progress is not being saved" is styled the same
+ * way, so a player learns one visual language: danger text, full-strength
+ * border. `clock_behind` and `conflict` are terminal for the session and were
+ * previously left with the neutral muted styling.
+ */
 .hud__save-status[data-save-state='blocked'],
 .hud__save-status[data-save-state='unavailable'],
 .hud__save-status[data-save-state='unreadable'],
-.hud__save-status[data-save-state='incompatible'] {
+.hud__save-status[data-save-state='incompatible'],
+.hud__save-status[data-save-state='clock_behind'],
+.hud__save-status[data-save-state='conflict'] {
   color: var(--danger, #e58b82);
+  border-color: var(--danger, #e58b82);
+  font-weight: 600;
 }
 
 .hud__save-status[hidden] {

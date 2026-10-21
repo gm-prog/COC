@@ -6,15 +6,25 @@ import {
   SaveStorageError,
   type VillageSave,
   type VillageStorage,
+  type VillageWriteResult,
 } from '../../src/persistence/villageSave';
 
 const START = 1_700_000_000_000;
 
-/** Storage double that records committed writes and can stall or fail them. */
+/**
+ * Storage double that records committed writes and can stall or fail them.
+ *
+ * `deferred` returns a promise per write, so a test can hold write A open while
+ * queueing B and then fail A at a moment it chooses — no sleeps, no luck.
+ */
 class RecordingStorage implements VillageStorage {
   readonly writes: VillageSave[] = [];
+  /** Writes that were attempted, committed or not. */
+  readonly attempts: { save: VillageSave; expectedRevision: number }[] = [];
   private readonly delays: number[];
   failWith: Error | null = null;
+  /** Set to answer the next write with a concurrency result instead of writing. */
+  conflictWith: VillageWriteResult | null = null;
 
   constructor(delays: number[] = []) {
     this.delays = [...delays];
@@ -24,11 +34,18 @@ class RecordingStorage implements VillageStorage {
     return Promise.resolve(undefined);
   }
 
-  async write(save: VillageSave): Promise<void> {
+  async write(save: VillageSave, expectedRevision: number): Promise<VillageWriteResult> {
+    this.attempts.push({ save, expectedRevision });
     const delay = this.delays.shift() ?? 0;
     if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    if (this.conflictWith) {
+      const outcome = this.conflictWith;
+      this.conflictWith = null;
+      return outcome;
+    }
     if (this.failWith) throw this.failWith;
     this.writes.push(save);
+    return { ok: true, revision: save.revision };
   }
 }
 

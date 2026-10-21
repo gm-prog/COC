@@ -594,7 +594,14 @@ function footprint(def: BuildingDef, x: number, y: number): Rect {
  * validator rejects up front; treating a missing row as unlimited here keeps
  * the command path total rather than throwing on malformed input.
  */
-function buildingLimit(
+/**
+ * The quantity ceiling for `buildingType` at `keepLevel`, or `undefined` when
+ * the config sets no limit.
+ *
+ * Exported so the persistence validator can enforce the same ceiling instead of
+ * re-deriving the indexing rule (including the clamp at the table's end).
+ */
+export function buildingLimit(
   config: GameConfig,
   buildingType: string,
   keepLevel: number,

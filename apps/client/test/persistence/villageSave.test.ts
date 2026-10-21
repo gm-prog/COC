@@ -61,12 +61,14 @@ describe('save envelope', () => {
   });
 
   it('keeps the save schema version independent of the database version', () => {
-    // Changing a record shape must never require an IndexedDB upgrade.
+    // Changing a record shape must never require an IndexedDB upgrade. v2 added
+    // `revision` (the concurrency token) and the database version stayed at 1.
     expect(SAVE_DB_VERSION).toBe(1);
-    expect(SAVE_SCHEMA_VERSION).toBe(1);
+    expect(SAVE_SCHEMA_VERSION).toBe(2);
 
     const save = createSave(freshState(), GAME_CONFIG.version, START);
-    expect(save.schemaVersion).toBe(1);
+    expect(save.schemaVersion).toBe(SAVE_SCHEMA_VERSION);
+    expect(save.revision).toBe(1);
   });
 
   it('snapshots the state, so later mutations cannot leak into a queued write', () => {
@@ -657,6 +659,360 @@ describe('persisted state validation', () => {
     const reusedId = structuredCopy(state);
     reusedId.obstacles[0]!.id = reusedId.buildings[0]!.id;
     expect(validatePersistedState(reusedId, GAME_CONFIG).join()).toContain('is already used');
+  });
+});
+
+/** Removes an index without shrinking the array, producing a real hole. */
+function punchHole<T>(array: T[], index: number): T[] {
+  Reflect.deleteProperty(array, index);
+  return array;
+}
+
+/** A state with one construction in flight, so `builders.busy` is populated. */
+function withUpgrade(state: PlayerState, finishAt: number): PlayerState {
+  const next = state;
+  const keep = next.buildings.find((building) => building.type === 'keep')!;
+  keep.upgrade = { toLevel: 2, finishAt };
+  next.builders.busy.push({ buildingId: keep.id, toLevel: 2, finishAt });
+  return next;
+}
+
+describe('sparse arrays are rejected', () => {
+  // `Array.prototype.forEach`/`map` skip holes, so a hole validates as "nothing
+  // to check" while every later `for…of` reads `undefined`. These use genuine
+  // holes (`delete arr[i]`), not `null` entries: JSON round-tripping turns a
+  // hole into `null`, which the existing tests already cover and which is a
+  // different value.
+  const state = structuredCopy(withGoldMine(freshState()));
+
+  it('rejects a hole in buildings, before or after a valid entry', () => {
+    const leading = structuredCopy(state);
+    punchHole(leading.buildings, 0);
+    const leadingProblems = validatePersistedState(leading, GAME_CONFIG).join('; ');
+    expect(leadingProblems).toContain('state.buildings has a hole at index 0');
+    // The entries that *are* present are still validated.
+    expect(leadingProblems).not.toContain('is not an object');
+
+    const trailing = structuredCopy(state);
+    punchHole(trailing.buildings, trailing.buildings.length - 1);
+    expect(validatePersistedState(trailing, GAME_CONFIG).join('; ')).toContain(
+      `state.buildings has a hole at index ${state.buildings.length - 1}`,
+    );
+
+    // A hole is not repaired by shifting or filling.
+    expect(Object.keys(state.buildings)).toHaveLength(state.buildings.length);
+  });
+
+  it('rejects a hole in obstacles', () => {
+    const broken = structuredCopy(state);
+    punchHole(broken.obstacles, 1);
+    expect(validatePersistedState(broken, GAME_CONFIG).join('; ')).toContain(
+      'state.obstacles has a hole at index 1',
+    );
+  });
+
+  it('rejects a hole in builders.busy', () => {
+    const broken = withUpgrade(structuredCopy(freshState()), START + 1_000);
+    punchHole(broken.builders.busy, 0);
+    const problems = validatePersistedState(broken, GAME_CONFIG).join('; ');
+    expect(problems).toContain('state.builders.busy has a hole at index 0');
+  });
+
+  it('rejects a hole in trainingQueues', () => {
+    const broken = structuredCopy(state);
+    broken.trainingQueues = [
+      { barracksId: broken.buildings[0]!.id, items: [] },
+    ];
+    punchHole(broken.trainingQueues, 0);
+    expect(validatePersistedState(broken, GAME_CONFIG).join('; ')).toContain(
+      'state.trainingQueues has a hole at index 0',
+    );
+  });
+
+  it('rejects a hole in a nested queue items array', () => {
+    const broken = structuredCopy(state);
+    broken.trainingQueues = [
+      {
+        barracksId: broken.buildings[0]!.id,
+        items: [
+          { troopId: 'barbarian', finishAt: START + 1_000 },
+          { troopId: 'archer', finishAt: START + 2_000 },
+        ],
+      },
+    ];
+    punchHole(broken.trainingQueues[0]!.items, 0);
+
+    const problems = validatePersistedState(broken, GAME_CONFIG).join('; ');
+    expect(problems).toContain('state.trainingQueues[0].items has a hole at index 0');
+    // The surviving item is still checked (and is still rejected: this config
+    // defines no barracks, so a queue cannot legally exist yet).
+    expect(problems).toContain('is not a barracks');
+  });
+
+  it('accepts the same arrays when they are dense', () => {
+    expect(validatePersistedState(structuredCopy(state), GAME_CONFIG)).toEqual([]);
+  });
+});
+
+describe('scheduled work must be reachable by catchUp', () => {
+  it('rejects an upgrade scheduled before the watermark', () => {
+    // `nextCompletionAt` skips anything earlier than `lastSyncAt`, so this job
+    // could never run and the builder would never be freed.
+    const broken = withUpgrade(structuredCopy(freshState()), START - 1);
+    const problems = validatePersistedState(broken, GAME_CONFIG).join('; ');
+    expect(problems).toContain('is before state.lastSyncAt');
+    expect(problems).toContain('could never complete');
+  });
+
+  it('accepts an upgrade scheduled exactly at the watermark', () => {
+    // `catchUp` applies completions at the cursor *before* accruing anything,
+    // so `finishAt === lastSyncAt` is a legitimate, completable job.
+    const boundary = withUpgrade(structuredCopy(freshState()), START);
+    expect(validatePersistedState(boundary, GAME_CONFIG)).toEqual([]);
+  });
+
+  it('rejects a queue item scheduled before the watermark', () => {
+    const broken = structuredCopy(freshState());
+    broken.trainingQueues = [
+      {
+        barracksId: broken.buildings[0]!.id,
+        items: [{ troopId: 'barbarian', finishAt: START - 1 }],
+      },
+    ];
+    const problems = validatePersistedState(broken, GAME_CONFIG).join('; ');
+    expect(problems).toContain('items[0].finishAt');
+    expect(problems).toContain('could never complete');
+  });
+
+  it('does not claim research is completed by catchUp', () => {
+    // Honest limitation: the simulation has no research completion path at all,
+    // so a temporal rule there would be invented rather than enforced.
+    const broken = structuredCopy(freshState());
+    broken.research = {
+      levels: { barbarian: 1 },
+      active: { unitId: 'archer', toLevel: 2, finishAt: START - 5_000 },
+    };
+    // Shape is valid; the checker must not pretend to know more than it does.
+    expect(validatePersistedState(broken, GAME_CONFIG)).toEqual([]);
+  });
+
+  it('still allows an overdue job that is ahead of the watermark', () => {
+    // The save was written at START, the job finishes at START+1s, and the
+    // device clock is far later. That is a normal offline completion.
+    const saved = withUpgrade(structuredCopy(freshState()), START + 1_000);
+    const restored = restoreVillage(
+      createSave(saved, GAME_CONFIG.version, START),
+      GAME_CONFIG,
+      START + 60_000,
+    );
+
+    expect(restored.reconciled).toBe(true);
+    const keep = restored.state.buildings.find((building) => building.type === 'keep')!;
+    expect(keep.level).toBe(2);
+    expect(keep.upgrade).toBeUndefined();
+    expect(restored.state.builders.busy).toEqual([]);
+  });
+});
+
+describe('safe integers and domain bounds', () => {
+  const state = structuredCopy(withGoldMine(freshState()));
+  const UNSAFE = Number.MAX_SAFE_INTEGER + 1;
+
+  it('rejects unsafe entity ids that would break id allocation', () => {
+    for (const id of [UNSAFE, Number.MAX_SAFE_INTEGER]) {
+      const broken = structuredCopy(state);
+      broken.buildings[0]!.id = id;
+      expect(validatePersistedState(broken, GAME_CONFIG).join('; '), `id ${id}`).toContain(
+        'state.buildings[0].id',
+      );
+    }
+
+    const obstacle = structuredCopy(state);
+    obstacle.obstacles[0]!.id = UNSAFE;
+    expect(validatePersistedState(obstacle, GAME_CONFIG).join('; ')).toContain(
+      'state.obstacles[0].id',
+    );
+
+    const builder = structuredCopy(state);
+    builder.builders.count = UNSAFE;
+    expect(validatePersistedState(builder, GAME_CONFIG).join('; ')).toContain(
+      'state.builders.count',
+    );
+  });
+
+  it('rejects unsafe timestamps, balances and counters', () => {
+    const cases: Array<[string, (state: PlayerState) => void, string]> = [
+      ['lastSyncAt', (value) => { value.lastSyncAt = UNSAFE; }, 'state.lastSyncAt'],
+      ['trophies', (value) => { value.trophies = UNSAFE; }, 'state.trophies'],
+      ['tutorialStep', (value) => { value.tutorialStep = UNSAFE; }, 'state.tutorialStep'],
+      ['resources.gold', (value) => { value.resources.gold = UNSAFE; }, 'state.resources.gold'],
+      ['army', (value) => { value.army = { barbarian: UNSAFE }; }, 'state.army.barbarian'],
+      ['spells', (value) => { value.spells = { rage: UNSAFE }; }, 'state.spells.rage'],
+      ['research', (value) => { value.research = { levels: { barbarian: UNSAFE } }; }, 'state.research.levels'],
+    ];
+
+    for (const [label, corrupt, expected] of cases) {
+      const broken = structuredCopy(state);
+      corrupt(broken);
+      expect(validatePersistedState(broken, GAME_CONFIG).join('; '), label).toContain(expected);
+    }
+  });
+
+  it('rejects unsafe coordinates rather than computing a bogus footprint', () => {
+    const broken = structuredCopy(state);
+    broken.buildings[0]!.x = UNSAFE;
+    const problems = validatePersistedState(broken, GAME_CONFIG).join('; ');
+    expect(problems).toContain('state.buildings[0].x');
+  });
+
+  it('rejects unsafe scheduled times and buffer amounts', () => {
+    const upgrade = withUpgrade(structuredCopy(freshState()), UNSAFE);
+    expect(validatePersistedState(upgrade, GAME_CONFIG).join('; ')).toContain(
+      'upgrade.finishAt',
+    );
+
+    const producing = catchUpTo(withGoldMine(freshState()), START + 30_000);
+    const mine = producing.buildings.find((building) => building.type === 'gold_mine')!;
+    expect(mine.buffer).toBeDefined();
+    mine.buffer!.amount = UNSAFE;
+    expect(validatePersistedState(producing, GAME_CONFIG).join('; ')).toContain(
+      'buffer.amount',
+    );
+  });
+
+  it('keeps accepting ordinary and maximum-supported values', () => {
+    const ordinary = structuredCopy(state);
+    ordinary.trophies = 4_321;
+    ordinary.tutorialStep = 7;
+    expect(validatePersistedState(ordinary, GAME_CONFIG)).toEqual([]);
+
+    const atTheEdge = structuredCopy(state);
+    atTheEdge.obstacles[0]!.id = Number.MAX_SAFE_INTEGER - 1; // == MAX_ENTITY_ID
+    expect(validatePersistedState(atTheEdge, GAME_CONFIG)).toEqual([]);
+  });
+});
+
+describe('gameplay invariants the engine maintains', () => {
+  const state = structuredCopy(withGoldMine(freshState()));
+
+  it('enforces the per-Keep building count ceiling', () => {
+    // Keep 1 allows one Gold Store and the village starts with none.
+    const oneStore = structuredCopy(state);
+    const template = oneStore.buildings.find((building) => building.type === 'gold_mine')!;
+    oneStore.buildings.push({
+      ...template,
+      id: 900,
+      type: 'gold_store',
+      x: 30,
+      y: 30,
+    });
+    expect(validatePersistedState(oneStore, GAME_CONFIG)).toEqual([]);
+
+    oneStore.buildings.push({
+      ...template,
+      id: 901,
+      type: 'gold_store',
+      x: 34,
+      y: 30,
+    });
+    expect(validatePersistedState(oneStore, GAME_CONFIG).join('; ')).toContain(
+      '2 × "gold_store" but Keep 1 allows 1',
+    );
+  });
+
+  it('counts buildings under construction towards the ceiling', () => {
+    const constructing = structuredCopy(state);
+    const template = constructing.buildings.find((building) => building.type === 'gold_mine')!;
+    // Level 0 is a reservation; `placeBuilding` counts it, so validation must.
+    constructing.buildings.push({
+      ...template,
+      id: 900,
+      type: 'gold_store',
+      level: 0,
+      x: 30,
+      y: 30,
+      upgrade: { toLevel: 1, finishAt: START + 1_000 },
+    });
+    constructing.builders.busy.push({ buildingId: 900, toLevel: 1, finishAt: START + 1_000 });
+    expect(validatePersistedState(constructing, GAME_CONFIG)).toEqual([]);
+
+    // A second reservation still counts, even though neither is finished.
+    constructing.buildings.push({
+      ...template,
+      id: 901,
+      type: 'gold_store',
+      level: 0,
+      x: 34,
+      y: 30,
+      upgrade: { toLevel: 1, finishAt: START + 1_000 },
+    });
+    constructing.builders.busy.push({ buildingId: 901, toLevel: 1, finishAt: START + 1_000 });
+    expect(validatePersistedState(constructing, GAME_CONFIG).join('; ')).toContain(
+      '2 × "gold_store" but Keep 1 allows 1',
+    );
+  });
+
+  it('enforces maxKeeps', () => {
+    const twoKeeps = structuredCopy(state);
+    const keep = twoKeeps.buildings.find((building) => building.type === 'keep')!;
+    twoKeeps.buildings.push({ ...keep, id: 900, x: 30, y: 30 });
+    expect(validatePersistedState(twoKeeps, GAME_CONFIG).join('; ')).toContain(
+      'but this config allows 1',
+    );
+  });
+
+  it('enforces the Keep requirement for a completed level', () => {
+    const tooHigh = structuredCopy(state);
+    const mine = tooHigh.buildings.find((building) => building.type === 'gold_mine')!;
+    // Gold Mine level 3 needs Keep 2; the village is at Keep 1.
+    mine.level = 3;
+    expect(validatePersistedState(tooHigh, GAME_CONFIG).join('; ')).toContain('needs Keep 2');
+  });
+
+  it('enforces the Keep requirement for an upgrade target', () => {
+    const tooHigh = structuredCopy(state);
+    const mine = tooHigh.buildings.find(
+      (building) => building.type === 'gold_mine' && building.level === 1,
+    )!;
+    mine.upgrade = { toLevel: 3, finishAt: START + 1_000 };
+    tooHigh.builders.busy.push({ buildingId: mine.id, toLevel: 3, finishAt: START + 1_000 });
+    const problems = validatePersistedState(tooHigh, GAME_CONFIG).join('; ');
+    expect(problems).toContain('is not one level above');
+    expect(problems).toContain('needs Keep 2');
+  });
+
+  it('enforces storage capacity but leaves uncapped resources alone', () => {
+    const overFull = structuredCopy(state);
+    overFull.resources.gold = 1_001; // Keep 1 stores exactly 1000
+    expect(validatePersistedState(overFull, GAME_CONFIG).join('; ')).toContain(
+      'exceeds the village storage capacity 1000',
+    );
+
+    const exact = structuredCopy(state);
+    exact.resources.gold = 1_000;
+    expect(validatePersistedState(exact, GAME_CONFIG)).toEqual([]);
+
+    const unlimited = structuredCopy(state);
+    unlimited.resources.gems = 5_000_000;
+    unlimited.resources.shards = 123_456;
+    expect(validatePersistedState(unlimited, GAME_CONFIG)).toEqual([]);
+  });
+
+  it('counts a completed store towards capacity', () => {
+    const withStore = structuredCopy(state);
+    const store = withStore.buildings.find((building) => building.type === 'gold_mine')!;
+    withStore.buildings.push({
+      ...store,
+      id: 900,
+      type: 'gold_store',
+      level: 1,
+      x: 30,
+      y: 30,
+      upgrade: undefined,
+    });
+    withStore.resources.gold = 3_000; // Keep 1000 + store 2500
+    const problems = validatePersistedState(withStore, GAME_CONFIG).join('; ');
+    expect(problems).not.toContain('storage capacity');
   });
 });
 

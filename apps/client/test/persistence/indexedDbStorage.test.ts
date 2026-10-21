@@ -48,13 +48,38 @@ async function rawRead(factory: IDBFactory): Promise<unknown> {
   }
 }
 
+/** Writes a value straight into the store, bypassing the compare-and-swap. */
+async function seedRaw(factory: IDBFactory, value: unknown): Promise<void> {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = factory.open(SAVE_DB_NAME, SAVE_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const upgraded = request.result;
+      if (!upgraded.objectStoreNames.contains(SAVE_STORE_NAME)) {
+        upgraded.createObjectStore(SAVE_STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(SAVE_STORE_NAME, 'readwrite');
+      tx.objectStore(SAVE_STORE_NAME).put(value, SAVE_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
 describe('IndexedDB village storage', () => {
   it('creates the documented store in a fresh database', async () => {
     const factory = new IDBFactory();
     // Let the storage class create the database, then inspect it as a second
     // connection would see it.
     const store = new IndexedDbVillageStorage(factory);
-    await store.write(freshSave());
+    await store.write(freshSave(), 0);
     store.close();
 
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -74,7 +99,7 @@ describe('IndexedDB village storage', () => {
     const store = new IndexedDbVillageStorage(factory);
     const save = freshSave();
 
-    await store.write(save);
+    await store.write(save, 0);
 
     expect(await store.read()).toEqual(save);
     // And it is really under `village`/`current`, not somewhere incidental.
@@ -95,7 +120,7 @@ describe('IndexedDB village storage', () => {
     const save = freshSave();
 
     const first = new IndexedDbVillageStorage(factory);
-    await first.write(save);
+    await first.write(save, 0);
     first.close();
 
     const second = new IndexedDbVillageStorage(factory);
@@ -108,10 +133,10 @@ describe('IndexedDB village storage', () => {
     const older = freshSave();
     const newerState = createNewPlayerState(GAME_CONFIG, START);
     newerState.resources.gold = 42;
-    const newer = createSave(newerState, GAME_CONFIG.version, START + 1);
+    const newer = createSave(newerState, GAME_CONFIG.version, START + 1, 2);
 
-    await store.write(older);
-    await store.write(newer);
+    await store.write(older, 0);
+    await store.write(newer, 1);
 
     expect(await store.read()).toEqual(newer);
     store.close();
@@ -123,8 +148,8 @@ describe('IndexedDB village storage', () => {
     const corrupt = {
       schemaVersion: SAVE_SCHEMA_VERSION + 5,
       savedAt: START,
-    } as unknown as VillageSave;
-    await store.write(corrupt);
+    };
+    await seedRaw(factory, corrupt);
 
     const loaded = await loadVillage(store, GAME_CONFIG);
 
@@ -140,7 +165,7 @@ describe('IndexedDB village storage', () => {
   it('rejects garbage rather than treating it as a village', async () => {
     const factory = new IDBFactory();
     const store = new IndexedDbVillageStorage(factory);
-    await store.write('not a village' as unknown as VillageSave);
+    await seedRaw(factory, 'not a village');
 
     const loaded = await loadVillage(store, GAME_CONFIG);
 
@@ -157,7 +182,7 @@ describe('IndexedDB village storage', () => {
     const unavailable = new IndexedDbVillageStorage();
 
     await expect(unavailable.read()).rejects.toBeInstanceOf(SaveStorageError);
-    await expect(unavailable.write(freshSave())).rejects.toBeInstanceOf(SaveStorageError);
+    await expect(unavailable.write(freshSave(), 0)).rejects.toBeInstanceOf(SaveStorageError);
 
     // The loader must not mistake that for an empty database.
     await expect(loadVillage(unavailable, GAME_CONFIG)).resolves.toMatchObject({
@@ -270,7 +295,7 @@ describe('transaction completion contract', () => {
     const fake = new FakeDatabase();
     const store = new IndexedDbVillageStorage({ open: () => fake.open() } as unknown as IDBFactory);
 
-    await expect(store.write(freshSave())).resolves.toBeUndefined();
+    await expect(store.write(freshSave(), 0)).resolves.toEqual({ ok: true, revision: 1 });
     expect(fake.transactionCalls).toEqual([SAVE_STORE_NAME]);
   });
 
@@ -281,6 +306,6 @@ describe('transaction completion contract', () => {
 
     // A `put` request's success only means the value was queued; reporting a
     // save here would lie to the player about their progress.
-    await expect(store.write(freshSave())).rejects.toBeInstanceOf(SaveStorageError);
+    await expect(store.write(freshSave(), 0)).rejects.toBeInstanceOf(SaveStorageError);
   });
 });

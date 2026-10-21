@@ -157,6 +157,7 @@ export {
 // commands
 export {
   applyCommand,
+  buildingLimit,
   type CommandContext,
   type CommandError,
   type CommandErrorCode,

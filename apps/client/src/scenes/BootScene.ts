@@ -143,7 +143,7 @@ export class BootScene extends Phaser.Scene {
    * command is refused: anything the player did here would be silently lost on
    * reload. Viewing, selection, panning and zooming stay available.
    */
-  private readonly readOnly: boolean;
+  private readOnly: boolean;
 
   /**
    * Best-effort flush when the page is being hidden.
@@ -206,10 +206,19 @@ export class BootScene extends Phaser.Scene {
       this.village.problem === null ? 'idle' : saveIndicatorForProblem(this.village.problem.code),
     );
     if (this.autosave) {
-      this.autosave.setOnStatus((status) => this.hud.setSaveIndicator(status));
+      this.autosave.setOnStatus((status) => {
+        // A conflict is not a transient status: another tab owns a newer
+        // record, so this session must stop pretending its changes are durable.
+        if (status === 'conflict') {
+          this.enterReadOnly('conflict', 'hud.conflict');
+          return;
+        }
+        this.hud.setSaveIndicator(status);
+      });
       // A runtime write failure (quota, revoked permission) is surfaced here;
       // the game keeps running in memory either way.
       this.autosave.setOnError(() => this.hud.setSaveIndicator('blocked'));
+      this.autosave.setOnConflict(() => this.enterReadOnly('conflict', 'hud.conflict'));
       window.addEventListener('pagehide', this.flushOnHide);
       document.addEventListener('visibilitychange', this.onVisibilityChange);
       // A first-time player has a village worth keeping: persist the starter
@@ -229,6 +238,25 @@ export class BootScene extends Phaser.Scene {
     this.setupInput();
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.teardownInput, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.teardownPersistence, this);
+  }
+
+  /**
+   * Switches the live session to read-only after it has already started.
+   *
+   * Used for a write conflict discovered mid-session: saving is refused from
+   * that moment, so continuing to accept commands would manufacture progress
+   * that can never be stored. Placement mode is cancelled and the hint explains
+   * the remedy (reload), matching the startup read-only states.
+   */
+  private enterReadOnly(indicator: 'conflict', hintKey: TranslationKey): void {
+    if (this.readOnly) {
+      this.hud.setSaveIndicator(indicator);
+      return;
+    }
+    this.readOnly = true;
+    if (this.placementType !== null) this.cancelPlacement();
+    this.hud.setSaveIndicator(indicator);
+    this.hud.setHint(hintKey);
   }
 
   private teardownPersistence(): void {

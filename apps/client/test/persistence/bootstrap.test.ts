@@ -16,11 +16,14 @@ import {
   SAVE_DB_VERSION,
   SAVE_KEY,
   SAVE_STORE_NAME,
+  SAVE_SCHEMA_VERSION,
   SaveStorageError,
   createSave,
   loadVillage,
+  storedRevisionOf,
   type VillageSave,
   type VillageStorage,
+  type VillageWriteResult,
 } from '../../src/persistence/villageSave';
 
 const START = 1_700_000_000_000;
@@ -32,6 +35,8 @@ class MemoryStorage implements VillageStorage {
   failRead: Error | null = null;
   failWrite: Error | null = null;
   hangRead = false;
+  /** Every revision assertion attempted, for conflict tests. */
+  readonly expectations: number[] = [];
 
   constructor(record?: unknown) {
     this.record = record;
@@ -43,10 +48,21 @@ class MemoryStorage implements VillageStorage {
     return this.record === undefined ? undefined : structuredClone(this.record);
   }
 
-  async write(save: VillageSave): Promise<void> {
+  /** Mirrors the real store's compare-and-swap, including never overwriting. */
+  async write(save: VillageSave, expectedRevision: number): Promise<VillageWriteResult> {
+    this.expectations.push(expectedRevision);
     if (this.failWrite) throw this.failWrite;
+    const stored =
+      this.record === undefined
+        ? 0
+        : storedRevisionOf(this.record);
+    if (stored === undefined) return { ok: false, reason: 'unreadable_record' };
+    if (stored !== expectedRevision) {
+      return { ok: false, reason: 'conflict', storedRevision: stored };
+    }
     this.writes += 1;
     this.record = structuredClone(save);
+    return { ok: true, revision: save.revision };
   }
 }
 
@@ -127,7 +143,7 @@ class RawStorage implements VillageStorage {
     return this.value;
   }
 
-  async write(): Promise<void> {
+  async write(): Promise<VillageWriteResult> {
     throw new Error('read-only test double: nothing may be written');
   }
 }
@@ -375,7 +391,7 @@ describe('village startup', () => {
 
     expect(storage.writes).toBe(1);
     const written = storage.record as VillageSave;
-    expect(written.schemaVersion).toBe(1);
+    expect(written.schemaVersion).toBe(SAVE_SCHEMA_VERSION);
     expect(written.configVersion).toBe(GAME_CONFIG.version);
     expect(written.state.resources.gold).toBe(321);
     village.autosave?.dispose();
@@ -805,5 +821,157 @@ describe('a clock-behind session is read-only', () => {
     if (!result.ok) return;
     expect(result.state.buildings).toHaveLength(village.state.buildings.length + 1);
     caught.autosave?.dispose();
+  });
+});
+
+describe('sparse and unreachable records through the real load path', () => {
+  /** A save with one extra construction in flight on the Keep. */
+  function saveWithUpgrade(finishAt: number): VillageSave {
+    const state = placeGoldMine(createNewPlayerState(GAME_CONFIG, START));
+    const keep = state.buildings.find((building) => building.type === 'keep')!;
+    keep.upgrade = { toLevel: 2, finishAt };
+    state.builders.busy.push({ buildingId: keep.id, toLevel: 2, finishAt });
+    return createSave(state, GAME_CONFIG.version, START);
+  }
+
+  it('rejects a record whose buildings array has a hole, preserving it', async () => {
+    const factory = new IDBFactory();
+    const record = createSave(
+      placeGoldMine(createNewPlayerState(GAME_CONFIG, START)),
+      GAME_CONFIG.version,
+      START,
+    );
+    // A genuine hole, not a null entry: this is the shape `forEach` would skip.
+    Reflect.deleteProperty(record.state.buildings, 0);
+    await writeRawRecord(factory, record);
+
+    const storedBefore = await readRawRecord(factory);
+    const storage = new IndexedDbVillageStorage(factory);
+
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START,
+      storage,
+      debounceMs: 0,
+    });
+
+    expect(village.source).toBe('unsaved');
+    expect(village.problem?.code).toBe('malformed');
+    expect(village.problem?.message).toContain('hole at index 0');
+    expect(village.autosave).toBeNull();
+    // Playable in memory, and the hole is not "repaired" into the running state.
+    expect(village.state.buildings).toHaveLength(createNewPlayerState(GAME_CONFIG, START).buildings.length);
+
+    // The bad record is exactly where the player left it.
+    expect(await readRawRecord(factory)).toEqual(storedBefore);
+    expect(renderSaveIndicator(village).state).toBe('unreadable');
+    storage.close();
+  });
+
+  it('rejects an upgrade scheduled before the watermark, preserving the record', async () => {
+    const record = saveWithUpgrade(START - 1);
+    const storage = new MemoryStorage(record);
+
+    const loaded = await loadVillage(storage, GAME_CONFIG);
+    expect(loaded.status).toBe('unreadable');
+    if (loaded.status !== 'unreadable') return;
+    expect(loaded.problem.code).toBe('malformed');
+    expect(loaded.problem.message).toContain('could never complete');
+
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START,
+      storage,
+      debounceMs: 0,
+    });
+    expect(village.autosave).toBeNull();
+    expect(village.problem?.code).toBe('malformed');
+    expect(storage.record).toEqual(record);
+    expect(storage.writes).toBe(0);
+  });
+
+  it('accepts an upgrade scheduled exactly at the watermark and completes it', async () => {
+    const record = saveWithUpgrade(START);
+    const storage = new MemoryStorage(record);
+
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START, // exactly the boundary
+      storage,
+      debounceMs: 0,
+    });
+
+    expect(village.problem).toBeNull();
+    expect(village.source).toBe('restored');
+    const keep = village.state.buildings.find((building) => building.type === 'keep')!;
+    expect(keep.level).toBe(2);
+    expect(keep.upgrade).toBeUndefined();
+    // The Keep's builder is released; the fixture's own construction keeps its
+    // own assignment.
+    expect(
+      village.state.builders.busy.some((assignment) => assignment.buildingId === keep.id),
+    ).toBe(false);
+    village.autosave?.dispose();
+  });
+
+  it('completes an overdue job that is ahead of the watermark but behind the clock', async () => {
+    const record = saveWithUpgrade(START + 1_000);
+    const storage = new MemoryStorage(record);
+
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START + 3_600_000,
+      storage,
+      debounceMs: 0,
+    });
+
+    expect(village.problem).toBeNull();
+    expect(village.reconciled).toBe(true);
+    expect(village.state.buildings.find((building) => building.type === 'keep')!.level).toBe(2);
+    village.autosave?.dispose();
+  });
+});
+
+describe('a session is scoped to the revision it loaded', () => {
+  it('writes the next revision and never revision 0', async () => {
+    const storage = new MemoryStorage();
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START,
+      storage,
+      debounceMs: 0,
+    });
+
+    expect(village.revision).toBe(0);
+    village.autosave?.schedule(village.state);
+    await village.autosave?.flush();
+
+    expect(storage.expectations).toEqual([0]);
+    expect((storage.record as VillageSave).revision).toBe(1);
+    village.autosave?.dispose();
+  });
+
+  it('carries a restored revision forward', async () => {
+    const record = createSave(
+      createNewPlayerState(GAME_CONFIG, START),
+      GAME_CONFIG.version,
+      START,
+      7,
+    );
+    const storage = new MemoryStorage(record);
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START,
+      storage,
+      debounceMs: 0,
+    });
+
+    expect(village.revision).toBe(7);
+    village.autosave?.schedule(village.state);
+    await village.autosave?.flush();
+
+    expect(storage.expectations).toEqual([7]);
+    expect((storage.record as VillageSave).revision).toBe(8);
+    village.autosave?.dispose();
   });
 });

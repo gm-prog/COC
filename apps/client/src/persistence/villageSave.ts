@@ -1,4 +1,5 @@
 import {
+  buildingLimit,
   catchUp,
   clonePlayerState,
   GRID,
@@ -10,6 +11,7 @@ import {
   rectsOverlap,
   RESOURCE_IDS,
   STATE_VERSION,
+  storageCapacity,
   type CatchUpEvent,
   type GameConfig,
   type PlayerState,
@@ -58,15 +60,25 @@ export const SAVE_KEY = 'current';
 /**
  * Version of the record stored under {@link SAVE_KEY}.
  *
- * v1 is the first format that ever shipped, so there are no historical
- * migrations to write. The dispatch machinery below exists for the *next*
- * change; inventing a v0 would mean maintaining a format no player ever had.
+ * v1 shipped first. v2 adds `revision`, the optimistic-concurrency stamp that
+ * stops a stale tab from silently overwriting a newer village; a v1 record is
+ * migrated in place on read (see {@link migrateV1ToV2}) rather than discarded.
  */
-export const SAVE_SCHEMA_VERSION = 1;
+export const SAVE_SCHEMA_VERSION = 2;
+
+/**
+ * Highest entity id a save may carry.
+ *
+ * The simulation allocates `highestEntityId + 1`, so an id at
+ * `Number.MAX_SAFE_INTEGER` would make that addition unrepresentable and two
+ * different ids could compare equal. One below the limit keeps the arithmetic
+ * exact.
+ */
+export const MAX_ENTITY_ID = Number.MAX_SAFE_INTEGER - 1;
 
 // -------------------------------------------------------------------- envelope
 
-/** The record stored in IndexedDB, schema v1. */
+/** The record stored in IndexedDB, schema v1. Still readable; migrated on load. */
 export interface VillageSaveV1 {
   schemaVersion: 1;
   /** Epoch milliseconds when the record was written (audit/debug only). */
@@ -77,7 +89,28 @@ export interface VillageSaveV1 {
   state: PlayerState;
 }
 
-export type VillageSave = VillageSaveV1;
+/**
+ * The record stored in IndexedDB, schema v2.
+ *
+ * `revision` is the concurrency token. Every successful write bumps it by one,
+ * and a write only commits if the record currently in the store carries exactly
+ * the revision the session loaded. Two tabs that start from the same village
+ * therefore cannot both commit: the second sees a revision it did not expect and
+ * is told to reload instead of overwriting.
+ */
+export interface VillageSaveV2 {
+  schemaVersion: 2;
+  /** Epoch milliseconds when the record was written (audit/debug only). */
+  savedAt: number;
+  /** `GAME_CONFIG.version` at write time; a mismatch means a different build. */
+  configVersion: GameConfig['version'];
+  /** Monotonic per-key counter. A stored record is never revision 0. */
+  revision: number;
+  /** The complete serializable village state. Plain JSON by construction. */
+  state: PlayerState;
+}
+
+export type VillageSave = VillageSaveV2;
 
 // --------------------------------------------------------------------- errors
 
@@ -119,14 +152,56 @@ export type VillageLoadResult =
 // ------------------------------------------------------------------- storage
 
 /**
+ * Result of a conditional write.
+ *
+ * A `conflict` is not a storage failure: the store worked, and it is telling the
+ * session that somebody else owns a newer record. The caller must stop writing
+ * and show the player how to recover.
+ */
+export type VillageWriteResult =
+  | { ok: true; revision: number }
+  /** The stored record carries a different revision than the write assumed. */
+  | { ok: false; reason: 'conflict'; storedRevision: number }
+  /** A record exists that this build cannot interpret; never overwritten. */
+  | { ok: false; reason: 'unreadable_record' };
+
+/**
  * The storage seam. Implemented by IndexedDB in the browser and by in-memory
  * doubles in tests, so the load/save logic never touches `indexedDB` directly.
+ *
+ * `write` is a compare-and-swap, not a blind put. It must check the stored
+ * revision and commit the new record **inside the same IndexedDB transaction**:
+ * a check-then-write split across two transactions leaves exactly the window
+ * this exists to close.
  */
 export interface VillageStorage {
   /** Resolves `undefined` when no save exists. Rejects if the store is unusable. */
   read(): Promise<unknown>;
-  /** Resolves only once the write is committed; rejects otherwise. */
-  write(save: VillageSave): Promise<void>;
+  /**
+   * Commits `save` only if the store currently holds `expectedRevision`.
+   * Resolves only once the transaction commits; rejects on storage failure.
+   */
+  write(save: VillageSave, expectedRevision: number): Promise<VillageWriteResult>;
+}
+
+/**
+ * The revision a *stored* record should be treated as, without migrating it.
+ *
+ * Mirrors what {@link migrateSave} would produce, so a legacy v1 record can be
+ * upgraded by the session that loaded it without being rewritten on read.
+ * `undefined` means "a value exists that this build cannot reason about" and is
+ * never overwritten.
+ */
+export function storedRevisionOf(raw: unknown): number | undefined {
+  if (!isRecord(raw)) return undefined;
+  if (raw.schemaVersion === 2) {
+    return isPositiveInteger(raw.revision) ? raw.revision : undefined;
+  }
+  if (raw.schemaVersion === 1) {
+    // v1 had no revision; migration assigns 1 (see `migrateV1ToV2`).
+    return 1;
+  }
+  return undefined;
 }
 
 /** Thrown when the store cannot be used. Never thrown for validation problems. */
@@ -167,12 +242,55 @@ export class IndexedDbVillageStorage implements VillageStorage {
     });
   }
 
-  async write(save: VillageSave): Promise<void> {
+  /**
+   * Compare-and-swap inside one `readwrite` transaction.
+   *
+   * IndexedDB runs `readwrite` transactions on the same store strictly one after
+   * another, so the `get` that reads the stored revision and the `put` that
+   * replaces it cannot be interleaved with another tab's write. Splitting them
+   * into two transactions would reintroduce exactly the lost-update window this
+   * is meant to close.
+   */
+  async write(save: VillageSave, expectedRevision: number): Promise<VillageWriteResult> {
     const db = await this.open();
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<VillageWriteResult>((resolve, reject) => {
       const tx = db.transaction(SAVE_STORE_NAME, 'readwrite');
-      tx.objectStore(SAVE_STORE_NAME).put(save, SAVE_KEY);
-      tx.oncomplete = () => resolve();
+      const store = tx.objectStore(SAVE_STORE_NAME);
+      const current = store.get(SAVE_KEY);
+
+      let outcome: VillageWriteResult | undefined;
+
+      current.onsuccess = () => {
+        const existing = current.result as unknown;
+        const storedRevision =
+          existing === undefined ? 0 : storedRevisionOf(existing);
+
+        if (storedRevision === undefined) {
+          // Something is stored that this build cannot interpret. Overwriting it
+          // would destroy the only copy of whatever it is; refuse.
+          outcome = { ok: false, reason: 'unreadable_record' };
+          return; // empty transaction commits, nothing changed
+        }
+        if (storedRevision !== expectedRevision) {
+          outcome = { ok: false, reason: 'conflict', storedRevision };
+          return;
+        }
+        if (save.revision !== expectedRevision + 1) {
+          throw new SaveStorageError(
+            `refusing to write revision ${save.revision} on top of ${expectedRevision}`,
+          );
+        }
+        store.put(save, SAVE_KEY);
+      };
+
+      tx.oncomplete = () => {
+        if (outcome === undefined) {
+          // The put was queued and the transaction committed.
+          resolve({ ok: true, revision: save.revision });
+        } else {
+          resolve(outcome);
+        }
+      };
       tx.onerror = () =>
         reject(new SaveStorageError('IndexedDB write failed', { cause: tx.error }));
       tx.onabort = () =>
@@ -182,14 +300,19 @@ export class IndexedDbVillageStorage implements VillageStorage {
 
   /** Closes the shared connection. Safe to call more than once. */
   close(): void {
-    void this.openPromise?.then((db) => db.close()).catch(() => undefined);
+    const pending = this.openPromise;
     this.openPromise = undefined;
+    void pending?.then((db) => db.close()).catch(() => undefined);
   }
 
   private open(): Promise<IDBDatabase> {
     // One connection per storage instance: opening on every save would leak
-    // them, and browsers only allow a handful.
-    this.openPromise ??= new Promise<IDBDatabase>((resolve, reject) => {
+    // them, and browsers only allow a handful. Returning the cached promise is
+    // also what keeps a persistent open failure from spawning a new rejected
+    // promise (and an unhandled rejection) on every call.
+    if (this.openPromise !== undefined) return this.openPromise;
+
+    const promise: Promise<IDBDatabase> = new Promise<IDBDatabase>((resolve, reject) => {
       const factory = this.factory;
       if (!factory) {
         reject(new SaveStorageError('IndexedDB is not available in this environment'));
@@ -210,14 +333,27 @@ export class IndexedDbVillageStorage implements VillageStorage {
           db.createObjectStore(SAVE_STORE_NAME);
         }
       };
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        const db = request.result;
+        // A newer build (another tab) wants to raise the database version. It
+        // cannot proceed while this connection is open, so close and forget the
+        // cached connection; the next operation reopens. Closing here does not
+        // by itself protect against stale writes — the revision check does — it
+        // only lets an upgrade finish instead of hanging on `blocked`.
+        db.onversionchange = () => {
+          db.close();
+          if (this.openPromise === promise) this.openPromise = undefined;
+        };
+        resolve(db);
+      };
       request.onerror = () =>
         reject(new SaveStorageError('IndexedDB open failed', { cause: request.error }));
       // `onblocked` fires while another tab holds an older version open. The
       // request stays pending until that tab closes, so the caller's timeout is
       // what bounds it; rejecting here would be premature.
     });
-    return this.openPromise;
+    this.openPromise = promise;
+    return promise;
   }
 }
 
@@ -235,13 +371,27 @@ export type SaveMigration = (record: Record<string, unknown>) => Record<string, 
 export type SaveMigrationRegistry = Readonly<Record<number, SaveMigration>>;
 
 /**
+ * Upgrades a v1 record to v2.
+ *
+ * v1 stored no revision. A v1 record is by definition the state of a store whose
+ * only writer never had to coordinate, so it becomes revision 1 — exactly what
+ * the first v2 writer would have produced. Nothing else about the record
+ * changes, so the player's village is carried across untouched; only the next
+ * write (revision 2) replaces it.
+ */
+export function migrateV1ToV2(record: Record<string, unknown>): Record<string, unknown> {
+  return { ...record, revision: 1 };
+}
+
+/**
  * Migrations from each older schema version to the next.
  *
- * Empty by design: {@link SAVE_SCHEMA_VERSION} is 1 and no player has ever
- * written another format. When v2 ships, add `1: migrateV1ToV2` here and raise
- * `SAVE_SCHEMA_VERSION`.
+ * Chained by `migrateSave`; a missing entry is a hard failure rather than a
+ * silent skip, so a shipped format can never fall out of the chain.
  */
-export const SAVE_MIGRATIONS: SaveMigrationRegistry = Object.freeze({});
+export const SAVE_MIGRATIONS: SaveMigrationRegistry = Object.freeze({
+  1: migrateV1ToV2,
+});
 
 export type MigrationResult =
   { ok: true; record: Record<string, unknown> } | { ok: false; problem: SaveProblem };
@@ -250,12 +400,63 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Integer checks for persisted data.
+ *
+ * `Number.isInteger` is not enough: it accepts 2^53, where `x + 1 === x`, so an
+ * id or timestamp at the edge of the range silently stops being unique. Every
+ * persisted number is therefore required to be a *safe* integer.
+ */
 function isNonNegativeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isPositiveInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 1;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+}
+
+/** An entity id the simulation can still allocate `+ 1` from exactly. */
+function isEntityId(value: unknown): value is number {
+  return isPositiveInteger(value) && value <= MAX_ENTITY_ID;
+}
+
+/**
+ * Reports indices missing from a sparse array.
+ *
+ * `forEach`/`map` skip holes, so `[ , building ]` would validate only the
+ * building and accept a state with a phantom element that every later `for…of`
+ * and `.filter` would read as `undefined`. Holes are rejected, never filled.
+ */
+function sparseHoles(array: readonly unknown[]): number[] {
+  const holes: number[] = [];
+  for (let index = 0; index < array.length; index += 1) {
+    if (!(index in array)) holes.push(index);
+  }
+  return holes;
+}
+
+/**
+ * Rejects holes in a persisted array and validates every present index.
+ *
+ * Used for every persisted array (`buildings`, `obstacles`, `builders.busy`,
+ * `trainingQueues`, and each `trainingQueues[].items`) so no callback-based
+ * iteration can hide an element behind a hole.
+ */
+function forEachDense(
+  raw: unknown[],
+  at: string,
+  visit: (entry: unknown, position: number) => void,
+  problems: string[],
+): boolean {
+  const holes = sparseHoles(raw);
+  for (const hole of holes) {
+    problems.push(`${at} has a hole at index ${hole}`);
+  }
+  for (let index = 0; index < raw.length; index += 1) {
+    if (!(index in raw)) continue; // reported above; there is no content to check
+    visit(raw[index], index);
+  }
+  return holes.length === 0;
 }
 
 /**
@@ -385,20 +586,36 @@ export function validatePersistedState(raw: unknown, config: GameConfig): string
     validateResourceTotals(raw.resources, problems);
   }
 
+  const lastSyncAt = isNonNegativeInteger(raw.lastSyncAt) ? raw.lastSyncAt : undefined;
   const index: EntityIndex = {
     buildingById: new Map(),
     rects: [],
     ids: new Set(),
-    lastSyncAt: isNonNegativeInteger(raw.lastSyncAt) ? raw.lastSyncAt : undefined,
+    lastSyncAt,
   };
-  const buildingsSound = validateBuildings(raw.buildings, config, index, problems);
+  const buildingsSound = validateBuildings(
+    raw.buildings,
+    config,
+    index,
+    raw.keepLevel,
+    lastSyncAt,
+    problems,
+  );
   validateObstacles(raw.obstacles, config, index, problems);
   validateEntityOverlaps(index.rects, problems);
   validateBuilders(raw.builders, index, problems);
   validateIdCountMap(raw.army, 'state.army', problems);
   validateIdCountMap(raw.spells, 'state.spells', problems);
-  validateTrainingQueues(raw.trainingQueues, config, index, problems);
+  validateTrainingQueues(raw.trainingQueues, config, index, lastSyncAt, problems);
   validateResearch(raw.research, problems);
+
+  // Gameplay invariants the engine maintains on every command. A state that
+  // violates one could not have been produced by this build, so it is a bad
+  // record rather than a rules question this layer gets to answer.
+  if (buildingsSound) {
+    validateBuildingLimits(raw, config, problems);
+    validateResourceCapacity(raw, config, problems);
+  }
 
   // Reuses the sim-core invariant rather than re-deriving the Keep rules.
   //
@@ -499,6 +716,8 @@ function validateBuildings(
   raw: unknown,
   config: GameConfig,
   index: EntityIndex,
+  keepLevelRaw: unknown,
+  lastSyncAt: number | undefined,
   problems: string[],
 ): boolean {
   if (!Array.isArray(raw)) {
@@ -518,71 +737,105 @@ function validateBuildings(
    */
   let sound = true;
 
-  raw.forEach((entry: unknown, position: number) => {
-    const at = `state.buildings[${position}]`;
-    if (!isRecord(entry)) {
-      problems.push(`${at} is not an object`);
-      sound = false;
-      return;
-    }
+  const keepLevel = isNonNegativeInteger(keepLevelRaw) ? keepLevelRaw : undefined;
 
-    if (!isPositiveInteger(entry.id)) {
-      problems.push(`${at}.id must be a positive integer`);
-      sound = false;
-    } else if (index.ids.has(entry.id)) {
-      problems.push(`${at}.id ${entry.id} is duplicated`);
-      sound = false;
-    } else {
-      index.ids.add(entry.id);
-      index.buildingById.set(entry.id, entry);
-    }
-
-    const def =
-      typeof entry.type === 'string'
-        ? config.buildings.find((candidate) => candidate.id === entry.type)
-        : undefined;
-    if (typeof entry.type !== 'string' || entry.type.length === 0) {
-      problems.push(`${at}.type must be a non-empty string`);
-      sound = false;
-    } else if (def === undefined) {
-      problems.push(`${at}.type "${String(entry.type)}" is not defined by this config`);
-      sound = false;
-    }
-
-    if (def !== undefined) {
-      const levels = def.levels;
-      const maxLevel = levels.reduce((highest, level) => Math.max(highest, level.level), 0);
-
-      // Level 0 is a building under construction (spec §7.5); every other level
-      // must exist in the definition.
-      if (!isNonNegativeInteger(entry.level)) {
-        problems.push(`${at}.level must be a non-negative integer`);
+  const dense = forEachDense(
+    raw,
+    'state.buildings',
+    (entry: unknown, position: number) => {
+      const at = `state.buildings[${position}]`;
+      if (!isRecord(entry)) {
+        problems.push(`${at} is not an object`);
         sound = false;
-      } else if (entry.level > maxLevel) {
-        problems.push(`${at}.level ${entry.level} exceeds "${def.id}" maximum ${maxLevel}`);
+        return;
       }
 
-      const levelDef =
-        isNonNegativeInteger(entry.level) && entry.level >= 1
-          ? levels.find((candidate) => candidate.level === entry.level)
+      if (!isEntityId(entry.id)) {
+        problems.push(`${at}.id must be a positive safe integer within the entity range`);
+        sound = false;
+      } else if (index.ids.has(entry.id)) {
+        problems.push(`${at}.id ${entry.id} is duplicated`);
+        sound = false;
+      } else {
+        index.ids.add(entry.id);
+        index.buildingById.set(entry.id, entry);
+      }
+
+      const def =
+        typeof entry.type === 'string'
+          ? config.buildings.find((candidate) => candidate.id === entry.type)
           : undefined;
+      if (typeof entry.type !== 'string' || entry.type.length === 0) {
+        problems.push(`${at}.type must be a non-empty string`);
+        sound = false;
+      } else if (def === undefined) {
+        problems.push(`${at}.type "${String(entry.type)}" is not defined by this config`);
+        sound = false;
+      }
 
-      validateUpgrade(at, entry, levels, problems);
-      validateBuffer(at, entry, levelDef, msPerHour, problems);
-    }
+      if (def !== undefined) {
+        const levels = def.levels;
+        const maxLevel = levels.reduce((highest, level) => Math.max(highest, level.level), 0);
 
-    index.rects.push(buildingRect(at, entry, def, problems));
-  });
+        // Level 0 is a building under construction (spec §7.5); every other
+        // level must exist in the definition.
+        if (!isNonNegativeInteger(entry.level)) {
+          problems.push(`${at}.level must be a non-negative integer`);
+          sound = false;
+        } else if (entry.level > maxLevel) {
+          problems.push(`${at}.level ${entry.level} exceeds "${def.id}" maximum ${maxLevel}`);
+          sound = false;
+        }
+
+        const levelDef =
+          isNonNegativeInteger(entry.level) && entry.level >= 1
+            ? levels.find((candidate) => candidate.level === entry.level)
+            : undefined;
+
+        // A completed level must clear its own Keep requirement. Level 0 has no
+        // row of its own: it is a reservation, gated on the target level below.
+        if (levelDef !== undefined && keepLevel !== undefined && levelDef.requiresKeep > keepLevel) {
+          problems.push(
+            `${at} is at level ${levelDef.level}, which needs Keep ${levelDef.requiresKeep} but state.keepLevel is ${keepLevel}`,
+          );
+          sound = false;
+        }
+
+        validateUpgrade(at, entry, levels, keepLevel, lastSyncAt, problems);
+        validateBuffer(at, entry, levelDef, msPerHour, problems);
+      }
+
+      index.rects.push(buildingRect(at, entry, def, problems));
+    },
+    problems,
+  );
 
   validateWatermarks(index, problems);
-  return sound;
+  // A hole is not sound for the typed helpers below: `Array.prototype.find`
+  // (used by `findKeep`) *visits* holes as `undefined`, so an otherwise valid
+  // array with one gap still throws there. Density is part of structural soundness.
+  return sound && dense;
 }
 
-/** Upgrade metadata must describe exactly one step up, into a real level. */
+/**
+ * Upgrade metadata must describe exactly one step up, into a real level, and be
+ * scheduled at or after the state's time watermark.
+ *
+ * The watermark rule is not cosmetic. `catchUp` starts its completion search at
+ * `state.lastSyncAt` (`nextCompletionAt(state, cursor, now)` ignores any
+ * `finishAt < cursor`), and every completion path filters on
+ * `finishAt <= at`. A job scheduled *before* the watermark is therefore never
+ * eligible again: the upgrade would never finish and the builder would never be
+ * freed. Exactly *at* the watermark is valid — `catchUp` applies completions at
+ * the cursor before accruing anything — so the boundary is `finishAt >=
+ * lastSyncAt`.
+ */
 function validateUpgrade(
   at: string,
   entry: Record<string, unknown>,
-  levels: readonly { level: number }[],
+  levels: readonly { level: number; requiresKeep: number }[],
+  keepLevel: number | undefined,
+  lastSyncAt: number | undefined,
   problems: string[],
 ): void {
   if (entry.upgrade === undefined) {
@@ -608,12 +861,24 @@ function validateUpgrade(
         `${at}.upgrade.toLevel ${toLevel} is not one level above the current level ${entry.level}`,
       );
     }
-    if (!levels.some((candidate) => candidate.level === toLevel)) {
+    const target = levels.find((candidate) => candidate.level === toLevel);
+    if (target === undefined) {
       problems.push(`${at}.upgrade.toLevel ${toLevel} is not a configured level`);
+    } else if (keepLevel !== undefined && target.requiresKeep > keepLevel) {
+      // `checkUpgrade` gates the *target* row on the completed Keep level.
+      problems.push(
+        `${at}.upgrade.toLevel ${toLevel} needs Keep ${target.requiresKeep} but state.keepLevel is ${keepLevel}`,
+      );
     }
   }
-  if (!isNonNegativeInteger(entry.upgrade.finishAt)) {
+
+  const finishAt = entry.upgrade.finishAt;
+  if (!isNonNegativeInteger(finishAt)) {
     problems.push(`${at}.upgrade.finishAt must be a non-negative integer timestamp`);
+  } else if (lastSyncAt !== undefined && finishAt < lastSyncAt) {
+    problems.push(
+      `${at}.upgrade.finishAt ${finishAt} is before state.lastSyncAt ${lastSyncAt} and could never complete`,
+    );
   }
 }
 
@@ -727,53 +992,58 @@ function validateObstacles(
     return;
   }
 
-  raw.forEach((entry: unknown, position: number) => {
-    const at = `state.obstacles[${position}]`;
-    if (!isRecord(entry)) {
-      problems.push(`${at} is not an object`);
-      return;
-    }
+  forEachDense(
+    raw,
+    'state.obstacles',
+    (entry: unknown, position: number) => {
+      const at = `state.obstacles[${position}]`;
+      if (!isRecord(entry)) {
+        problems.push(`${at} is not an object`);
+        return;
+      }
 
-    if (!isPositiveInteger(entry.id)) {
-      problems.push(`${at}.id must be a positive integer`);
-    } else if (index.ids.has(entry.id)) {
-      problems.push(`${at}.id ${entry.id} is already used`);
-    } else {
-      index.ids.add(entry.id);
-    }
+      if (!isEntityId(entry.id)) {
+        problems.push(`${at}.id must be a positive safe integer within the entity range`);
+      } else if (index.ids.has(entry.id)) {
+        problems.push(`${at}.id ${entry.id} is already used`);
+      } else {
+        index.ids.add(entry.id);
+      }
 
-    const def =
-      typeof entry.type === 'string'
-        ? config.obstacles.find((candidate) => candidate.id === entry.type)
-        : undefined;
-    if (typeof entry.type !== 'string' || entry.type.length === 0) {
-      problems.push(`${at}.type must be a non-empty string`);
-    } else if (def === undefined) {
-      problems.push(`${at}.type "${String(entry.type)}" is not defined by this config`);
-    }
+      const def =
+        typeof entry.type === 'string'
+          ? config.obstacles.find((candidate) => candidate.id === entry.type)
+          : undefined;
+      if (typeof entry.type !== 'string' || entry.type.length === 0) {
+        problems.push(`${at}.type must be a non-empty string`);
+      } else if (def === undefined) {
+        problems.push(`${at}.type "${String(entry.type)}" is not defined by this config`);
+      }
 
-    if (!isNonNegativeInteger(entry.x) || !isNonNegativeInteger(entry.y)) {
-      problems.push(`${at}.x and ${at}.y must be non-negative integer tile coordinates`);
-      return;
-    }
-    if (def === undefined) return;
+      if (!isNonNegativeInteger(entry.x) || !isNonNegativeInteger(entry.y)) {
+        problems.push(`${at}.x and ${at}.y must be non-negative integer tile coordinates`);
+        return;
+      }
+      if (def === undefined) return;
 
-    const rect = { x: entry.x, y: entry.y, w: def.size.w, h: def.size.h };
-    const bottomRight = { x: rect.x + rect.w - 1, y: rect.y + rect.h - 1 };
-    if (!isMapTile(GRID, rect.x, rect.y) || !isMapTile(GRID, bottomRight.x, bottomRight.y)) {
-      problems.push(
-        `${at} occupies a ${rect.w}×${rect.h} footprint that leaves the ${GRID.total}×${GRID.total} map`,
-      );
-      return;
-    }
+      const rect = { x: entry.x, y: entry.y, w: def.size.w, h: def.size.h };
+      const bottomRight = { x: rect.x + rect.w - 1, y: rect.y + rect.h - 1 };
+      if (!isMapTile(GRID, rect.x, rect.y) || !isMapTile(GRID, bottomRight.x, bottomRight.y)) {
+        problems.push(
+          `${at} occupies a ${rect.w}×${rect.h} footprint that leaves the ${GRID.total}×${GRID.total} map`,
+        );
+        return;
+      }
 
-    index.rects.push({
-      id: isPositiveInteger(entry.id) ? entry.id : -1,
-      label: at,
-      rect,
-      valid: true,
-    });
-  });
+      index.rects.push({
+        id: isEntityId(entry.id) ? entry.id : -1,
+        label: at,
+        rect,
+        valid: true,
+      });
+    },
+    problems,
+  );
 }
 
 /** Two entities may not share a tile; the placement rules depend on it. */
@@ -812,46 +1082,51 @@ function validateBuilders(raw: unknown, index: EntityIndex, problems: string[]):
   }
 
   const assigned = new Map<number, string[]>();
-  raw.busy.forEach((entry: unknown, position: number) => {
-    const at = `state.builders.busy[${position}]`;
-    if (!isRecord(entry)) {
-      problems.push(`${at} is not an object`);
-      return;
-    }
-
-    if (!isPositiveInteger(entry.buildingId)) {
-      problems.push(`${at}.buildingId must be a positive integer`);
-    } else {
-      const building = index.buildingById.get(entry.buildingId);
-      if (building === undefined) {
-        // A builder assigned to a building that is not in the save would make
-        // completion lookups fail forever — the builder could never be freed.
-        problems.push(`${at}.buildingId must reference a building in the save`);
-      } else {
-        const upgrade = building.upgrade;
-        if (!isRecord(upgrade)) {
-          problems.push(`${at}.buildingId ${entry.buildingId} has no upgrade in flight`);
-        } else {
-          if (entry.toLevel !== upgrade.toLevel) {
-            problems.push(`${at}.toLevel does not match its building's upgrade`);
-          }
-          if (entry.finishAt !== upgrade.finishAt) {
-            problems.push(`${at}.finishAt does not match its building's upgrade`);
-          }
-        }
-        const list = assigned.get(entry.buildingId) ?? [];
-        list.push(at);
-        assigned.set(entry.buildingId, list);
+  forEachDense(
+    raw.busy,
+    'state.builders.busy',
+    (entry: unknown, position: number) => {
+      const at = `state.builders.busy[${position}]`;
+      if (!isRecord(entry)) {
+        problems.push(`${at} is not an object`);
+        return;
       }
-    }
 
-    if (!isPositiveInteger(entry.toLevel)) {
-      problems.push(`${at}.toLevel must be a positive integer`);
-    }
-    if (!isNonNegativeInteger(entry.finishAt)) {
-      problems.push(`${at}.finishAt must be a non-negative integer timestamp`);
-    }
-  });
+      if (!isEntityId(entry.buildingId)) {
+        problems.push(`${at}.buildingId must be a positive safe integer`);
+      } else {
+        const building = index.buildingById.get(entry.buildingId);
+        if (building === undefined) {
+          // A builder assigned to a building that is not in the save would make
+          // completion lookups fail forever — the builder could never be freed.
+          problems.push(`${at}.buildingId must reference a building in the save`);
+        } else {
+          const upgrade = building.upgrade;
+          if (!isRecord(upgrade)) {
+            problems.push(`${at}.buildingId ${entry.buildingId} has no upgrade in flight`);
+          } else {
+            if (entry.toLevel !== upgrade.toLevel) {
+              problems.push(`${at}.toLevel does not match its building's upgrade`);
+            }
+            if (entry.finishAt !== upgrade.finishAt) {
+              problems.push(`${at}.finishAt does not match its building's upgrade`);
+            }
+          }
+          const list = assigned.get(entry.buildingId) ?? [];
+          list.push(at);
+          assigned.set(entry.buildingId, list);
+        }
+      }
+
+      if (!isPositiveInteger(entry.toLevel)) {
+        problems.push(`${at}.toLevel must be a positive integer`);
+      }
+      if (!isNonNegativeInteger(entry.finishAt)) {
+        problems.push(`${at}.finishAt must be a non-negative integer timestamp`);
+      }
+    },
+    problems,
+  );
 
   for (const [id, building] of index.buildingById) {
     if (!isRecord(building.upgrade)) continue;
@@ -864,10 +1139,19 @@ function validateBuilders(raw: unknown, index: EntityIndex, problems: string[]):
   }
 }
 
+/**
+ * Queue shape, barracks ownership, and the same temporal rule as upgrades.
+ *
+ * `completeTrainingAt` finishes items with `finishAt <= at`, and
+ * `nextCompletionAt` ignores anything before the cursor (`lastSyncAt`). An item
+ * scheduled earlier than the watermark is therefore unreachable: the troops
+ * would be stuck in the queue forever. Exactly at the watermark is fine.
+ */
 function validateTrainingQueues(
   raw: unknown,
   config: GameConfig,
   index: EntityIndex,
+  lastSyncAt: number | undefined,
   problems: string[],
 ): void {
   if (!Array.isArray(raw)) {
@@ -875,46 +1159,61 @@ function validateTrainingQueues(
     return;
   }
 
-  raw.forEach((queue: unknown, position: number) => {
-    const at = `state.trainingQueues[${position}]`;
-    if (!isRecord(queue)) {
-      problems.push(`${at} is not an object`);
-      return;
-    }
-
-    if (!isPositiveInteger(queue.barracksId)) {
-      problems.push(`${at}.barracksId must be a positive integer`);
-    } else {
-      const building = index.buildingById.get(queue.barracksId);
-      if (building === undefined) {
-        problems.push(`${at}.barracksId must reference a building in the save`);
-      } else {
-        const def = config.buildings.find((candidate) => candidate.id === building.type);
-        const level = def?.levels.find((candidate) => candidate.level === building.level);
-        if (level?.queueSlots === undefined) {
-          problems.push(`${at}.barracksId ${queue.barracksId} is not a barracks`);
-        }
-      }
-    }
-
-    if (!Array.isArray(queue.items)) {
-      problems.push(`${at}.items must be an array`);
-      return;
-    }
-    queue.items.forEach((item: unknown, slot: number) => {
-      const itemAt = `${at}.items[${slot}]`;
-      if (!isRecord(item)) {
-        problems.push(`${itemAt} is not an object`);
+  forEachDense(
+    raw,
+    'state.trainingQueues',
+    (queue: unknown, position: number) => {
+      const at = `state.trainingQueues[${position}]`;
+      if (!isRecord(queue)) {
+        problems.push(`${at} is not an object`);
         return;
       }
-      if (typeof item.troopId !== 'string' || item.troopId.length === 0) {
-        problems.push(`${itemAt}.troopId must be a non-empty string`);
+
+      if (!isEntityId(queue.barracksId)) {
+        problems.push(`${at}.barracksId must be a positive safe integer`);
+      } else {
+        const building = index.buildingById.get(queue.barracksId);
+        if (building === undefined) {
+          problems.push(`${at}.barracksId must reference a building in the save`);
+        } else {
+          const def = config.buildings.find((candidate) => candidate.id === building.type);
+          const level = def?.levels.find((candidate) => candidate.level === building.level);
+          if (level?.queueSlots === undefined) {
+            problems.push(`${at}.barracksId ${queue.barracksId} is not a barracks`);
+          }
+        }
       }
-      if (!isNonNegativeInteger(item.finishAt)) {
-        problems.push(`${itemAt}.finishAt must be a non-negative integer timestamp`);
+
+      if (!Array.isArray(queue.items)) {
+        problems.push(`${at}.items must be an array`);
+        return;
       }
-    });
-  });
+      forEachDense(
+        queue.items,
+        `${at}.items`,
+        (item: unknown, slot: number) => {
+          const itemAt = `${at}.items[${slot}]`;
+          if (!isRecord(item)) {
+            problems.push(`${itemAt} is not an object`);
+            return;
+          }
+          if (typeof item.troopId !== 'string' || item.troopId.length === 0) {
+            problems.push(`${itemAt}.troopId must be a non-empty string`);
+          }
+          const finishAt = item.finishAt;
+          if (!isNonNegativeInteger(finishAt)) {
+            problems.push(`${itemAt}.finishAt must be a non-negative integer timestamp`);
+          } else if (lastSyncAt !== undefined && finishAt < lastSyncAt) {
+            problems.push(
+              `${itemAt}.finishAt ${finishAt} is before state.lastSyncAt ${lastSyncAt} and could never complete`,
+            );
+          }
+        },
+        problems,
+      );
+    },
+    problems,
+  );
 }
 
 function validateResearch(raw: unknown, problems: string[]): void {
@@ -951,6 +1250,92 @@ function validateResearch(raw: unknown, problems: string[]): void {
   }
 }
 
+/**
+ * Quantity ceilings from `config.limits`.
+ *
+ * `buildingLimit` is the simulation's own helper (exported from `sim-core` for
+ * exactly this), so the ceiling is not re-derived here. Level-0 constructions
+ * count, because `placeBuilding` counts them: a reservation that did not count
+ * would let two builders slip past the limit. `maxKeeps` is enforced the same
+ * way, against the configured Keep type rather than a literal id.
+ */
+function validateBuildingLimits(
+  raw: Record<string, unknown>,
+  config: GameConfig,
+  problems: string[],
+): void {
+  const buildings = raw.buildings as unknown[];
+  const keepLevel = raw.keepLevel as number;
+
+  // Iterate indices, not the iterator: `for…of` on a sparse array yields
+  // `undefined` for every hole, so counting would either throw or credit the
+  // hole to a bogus type. Holes are reported by `validateBuildings`; here they
+  // are simply skipped, and so is any entry that is not an object.
+  const counts = new Map<string, number>();
+  for (let index = 0; index < buildings.length; index += 1) {
+    if (!(index in buildings)) continue;
+    const entry = buildings[index];
+    if (!isRecord(entry) || typeof entry.type !== 'string') continue;
+    counts.set(entry.type, (counts.get(entry.type) ?? 0) + 1);
+  }
+
+  for (const [type, count] of counts) {
+    const limit = buildingLimit(config, type, keepLevel);
+    if (limit !== undefined && count > limit) {
+      problems.push(
+        `state.buildings has ${count} × "${type}" but Keep ${keepLevel} allows ${limit}`,
+      );
+    }
+  }
+
+  const keeps = counts.get(KEEP_BUILDING_ID) ?? 0;
+  if (keeps > config.limits.maxKeeps) {
+    problems.push(
+      `state.buildings has ${keeps} Keep(s) but this config allows ${config.limits.maxKeeps}`,
+    );
+  }
+}
+
+/**
+ * Balances may not exceed what the village can store.
+ *
+ * `storageCapacity` is the authoritative sum over the *completed* levels that
+ * carry a `storageCap`. Resources with no cap anywhere (gems, shards) are
+ * deliberately unbounded, and a resource whose capacity is `undefined` is not
+ * checked at all — a village with no completed storage yet must not be rejected
+ * for holding its starting balance. Collections and obstacle rewards are capped
+ * on the way in (`remainingCapacity`), so any state the engine produced
+ * satisfies this; one that does not could not have been played, and would let a
+ * reload grant more than the live game would.
+ */
+function validateResourceCapacity(
+  raw: Record<string, unknown>,
+  config: GameConfig,
+  problems: string[],
+): void {
+  const resources = raw.resources;
+  if (!isRecord(resources)) return; // already reported by `validateResourceTotals`
+
+  const state = raw as unknown as PlayerState;
+  let capacity: Partial<Record<string, number>>;
+  try {
+    capacity = storageCapacity(state, config) as Partial<Record<string, number>>;
+  } catch {
+    // A malformed building that `storageCapacity` cannot read was already
+    // reported by `validateBuildings`; never let this check throw.
+    return;
+  }
+
+  for (const id of RESOURCE_IDS) {
+    const cap = capacity[id];
+    const amount = resources[id];
+    if (cap === undefined || !isNonNegativeInteger(amount)) continue;
+    if (amount > cap) {
+      problems.push(`state.resources.${id} ${amount} exceeds the village storage capacity ${cap}`);
+    }
+  }
+}
+
 export type EnvelopeCheck = { ok: true; save: VillageSave } | { ok: false; problem: SaveProblem };
 
 /**
@@ -979,6 +1364,17 @@ export function checkSaveEnvelope(raw: unknown, config: GameConfig): EnvelopeChe
     return {
       ok: false,
       problem: { code: 'malformed', message: 'save.savedAt is not a timestamp' },
+    };
+  }
+  if (!isPositiveInteger(raw.revision)) {
+    // A stored record always has a writer, so revision 0 is not a legal value
+    // to read; 0 is only the *absence* of a record, used as the write base.
+    return {
+      ok: false,
+      problem: {
+        code: 'malformed',
+        message: 'save.revision must be a positive safe integer',
+      },
     };
   }
   if (typeof raw.configVersion !== 'string') {
@@ -1036,11 +1432,17 @@ export function createSave(
   state: PlayerState,
   configVersion: GameConfig['version'],
   savedAt: number,
+  /**
+   * Revision this record carries. The autosave passes `base + 1`; the default
+   * suits fixtures, which represent a store that has been written once.
+   */
+  revision = 1,
 ): VillageSave {
   return {
-    schemaVersion: SAVE_SCHEMA_VERSION,
+    schemaVersion: 2,
     savedAt,
     configVersion,
+    revision,
     state: clonePlayerState(state),
   };
 }

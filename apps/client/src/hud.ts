@@ -12,8 +12,8 @@ import type { SaveStatus } from './persistence/autosave';
 /**
  * Everything the save indicator can show.
  *
- * The first four are the live autosave status; the rest are the reasons saving
- * is switched off for this session.
+ * The first five are the live autosave status (including a terminal write
+ * conflict); the rest are the reasons saving is switched off for this session.
  */
 export type SaveIndicator =
   | SaveStatus
@@ -32,6 +32,7 @@ const SAVE_INDICATOR_KEYS: Record<SaveIndicator, TranslationKey> = {
   unreadable: 'save.unreadable',
   incompatible: 'save.incompatible',
   clock_behind: 'save.clockBehind',
+  conflict: 'save.conflict',
 };
 
 /**
