@@ -62,7 +62,7 @@
   "shop.select": "Choose",
   "shop.selectNamed": "Choose {building}",
   "shop.size": "{width}×{height} tiles",
-  "shop.details": "{size} · {cost} · {duration}",
+  "shop.details": "{cost} · {duration}",
   "shop.free": "Free",
   "shop.instant": "Instant",
   "shop.seconds": "{seconds}s",
