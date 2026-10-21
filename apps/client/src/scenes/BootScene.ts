@@ -6,6 +6,7 @@ import {
   catchUp,
   GRID,
   SIM_CORE_VERSION,
+  storageCapacity,
   type BuildingCategory,
   type PlayerState,
   type ResourceId,
@@ -34,6 +35,11 @@ import {
   type MoveSession,
   type VillageInteraction,
 } from '../villageMove';
+import {
+  hasCappedReward,
+  obstacleRemovalFeedback,
+  resolveObstacleRemoval,
+} from '../villageObstacleRemoval';
 import { listBuildingShopItems } from '../villageShop';
 import { getBuildingUpgradeSnapshot } from '../villageUpgrade';
 import { readOnlyHintFor, saveIndicatorForProblem } from '../hud';
@@ -224,6 +230,7 @@ export class BootScene extends Phaser.Scene {
       onCollectResource: (buildingId) => this.collectResourceFromBuilding(buildingId),
       onStartUpgrade: (buildingId) => this.startBuildingUpgrade(buildingId),
       onMoveBuilding: (buildingId) => this.beginMove(buildingId),
+      onRemoveObstacle: (obstacleId) => this.removeObstacle(obstacleId),
     });
 
     this.world = this.add.container(0, 0);
@@ -764,8 +771,19 @@ export class BootScene extends Phaser.Scene {
     this.hud.setSelection({
       kind: 'obstacle',
       id: entity.definition.id,
+      // The instance id, not the type: the village holds several trees and
+      // rocks, and the command addresses one of them.
+      entityId: entity.instance.id,
       x: entity.instance.x,
       y: entity.instance.y,
+      // The configured reward, shown as a preview. What is actually credited
+      // depends on storage room at the moment of removal and is reported
+      // afterwards from the command's own event.
+      reward: entity.definition.reward,
+      rewardCapped: hasCappedReward(
+        entity.definition.reward,
+        storageCapacity(this.playerState, GAME_CONFIG),
+      ),
     });
   }
 
@@ -809,6 +827,78 @@ export class BootScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * Clears one obstacle through the authoritative command.
+   *
+   * The obstacle id comes from the selection panel's own dataset, so it is
+   * always the instance the player pointed at. Nothing is edited locally: the
+   * command removes the obstacle from the state, frees its tiles and decides
+   * how much of the configured reward fits into storage. A refusal leaves the
+   * selection, the village and the save exactly as they were.
+   */
+  private removeObstacle(obstacleId: number): void {
+    if (this.readOnly) {
+      this.hud.setHint(this.readOnlyHintKey);
+      return;
+    }
+
+    const entity = listVillageEntities(this.playerState, GAME_CONFIG).find(
+      (candidate) => candidate.instance.id === obstacleId,
+    );
+    // A stale id can only come from a panel that outlived its obstacle; the
+    // command would reject it anyway, but there would be no tile to point at.
+    if (!entity || entity.kind !== 'obstacle') {
+      this.hud.setSelection(null);
+      this.hud.setHint('obstacle.removeFailed');
+      return;
+    }
+
+    const point = tileCenterToScreen(
+      entity.instance.x + entity.definition.size.w / 2,
+      entity.instance.y + entity.definition.size.h / 2,
+    );
+
+    const now = this.getNow();
+    const attempt = resolveObstacleRemoval({
+      state: this.playerState,
+      config: GAME_CONFIG,
+      obstacleId,
+      now,
+      readOnly: this.readOnly,
+    });
+
+    if (attempt.kind === 'refused') {
+      // Saving was switched off underneath us; the session warning explains it.
+      this.hud.setHint(this.readOnlyHintKey);
+      return;
+    }
+    if (attempt.kind === 'rejected') {
+      // The obstacle stays rendered and selected so the player can retry.
+      this.hud.setHint('obstacle.removeFailed');
+      return;
+    }
+
+    this.playerState = attempt.state;
+    this.persist();
+
+    // The obstacle no longer exists, so its selection target must go with it.
+    this.cancelMode();
+    this.selectedEntity = null;
+    this.selectedTile = null;
+    this.redrawSelection();
+    this.hud.setSelection(null);
+
+    this.drawVillageEntities();
+    this.hud.setVillageSnapshot(buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now));
+    this.hud.setShopCatalog(listBuildingShopItems(this.playerState, GAME_CONFIG));
+
+    if (attempt.removed) {
+      const feedback = obstacleRemovalFeedback(attempt.removed);
+      this.hud.setHint(feedback.key, feedback.params);
+      this.showFloatingMessage(point, t(feedback.key, feedback.params), '#f4d28a');
+    }
+  }
+
   private showCollectionFeedback(
     entity: Extract<VillageEntity, { kind: 'building' }>,
     accepted: number,
@@ -833,12 +923,27 @@ export class BootScene extends Phaser.Scene {
       message = t('collection.floating', { amount: accepted, resource: resourceName });
     }
 
+    this.showFloatingMessage(point, message, accepted > 0 ? '#f4d28a' : '#ef6a6a');
+  }
+
+  /**
+   * A short-lived number or message above a tile.
+   *
+   * Presentation only, and deliberately not a toast: Phase 3's completion-toast
+   * item is still open, so this stays the lightweight feedback the collection
+   * flow already used.
+   */
+  private showFloatingMessage(
+    point: { x: number; y: number },
+    message: string,
+    color: string,
+  ): void {
     const floating = this.add
       .text(point.x, point.y - 20, message, {
         fontFamily: 'system-ui, sans-serif',
         fontSize: '16px',
         fontStyle: 'bold',
-        color: accepted > 0 ? '#f4d28a' : '#ef6a6a',
+        color,
         stroke: '#0d1117',
         strokeThickness: 4,
         align: 'center',

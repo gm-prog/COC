@@ -4,10 +4,11 @@ import {
   type VillageHudSnapshot,
 } from './villageHud';
 import type { BuildingShopItem } from './villageShop';
-import type { BuildingLevel, ResourceId } from '@coc/sim-core';
+import type { BuildingLevel, ResourceAmount, ResourceId } from '@coc/sim-core';
 import type { BuildingUpgradeSnapshot } from './villageUpgrade';
 import type { SaveProblemCode } from './persistence/villageSave';
 import type { SaveStatus } from './persistence/autosave';
+import { formatResourceAmount } from './villageObstacleRemoval';
 
 /** Banner feedback shared by placement and move mode. */
 export type BannerFeedback = 'none' | 'valid' | 'invalid' | 'outside';
@@ -89,6 +90,7 @@ export class Hud {
   private onCollectResource: ((buildingId: number) => void) | null = null;
   private onStartUpgrade: ((buildingId: number) => void) | null = null;
   private onMoveBuilding: ((buildingId: number) => void) | null = null;
+  private onRemoveObstacle: ((obstacleId: number) => void) | null = null;
 
   private readonly handleHudClick = (event: MouseEvent): void => {
     if (!(event.target instanceof Element)) return;
@@ -123,6 +125,12 @@ export class Hud {
       if (Number.isInteger(buildingId) && buildingId > 0) {
         this.onMoveBuilding?.(buildingId);
       }
+    } else if (action === 'remove-obstacle') {
+      // An obstacle id, not a building id: the two actions never share a target.
+      const obstacleId = Number(actionElement.dataset.obstacleId);
+      if (Number.isInteger(obstacleId) && obstacleId > 0) {
+        this.onRemoveObstacle?.(obstacleId);
+      }
     }
   };
 
@@ -145,12 +153,14 @@ export class Hud {
     onCollectResource: (buildingId: number) => void;
     onStartUpgrade: (buildingId: number) => void;
     onMoveBuilding: (buildingId: number) => void;
+    onRemoveObstacle: (obstacleId: number) => void;
   }): void {
     this.onSelectBuilding = handlers.onSelectBuilding;
     this.onCancelPlacement = handlers.onCancelPlacement;
     this.onCollectResource = handlers.onCollectResource;
     this.onStartUpgrade = handlers.onStartUpgrade;
     this.onMoveBuilding = handlers.onMoveBuilding;
+    this.onRemoveObstacle = handlers.onRemoveObstacle;
   }
 
   isShopOpen(): boolean {
@@ -473,15 +483,20 @@ export class Hud {
       entityId?: number;
       collection?: { resource: ResourceId; amount: number };
       upgrade?: BuildingUpgradeSnapshot;
+      /** Configured reward an obstacle would grant if removed. */
+      reward?: ResourceAmount;
+      /** True when part of that reward is subject to a storage cap. */
+      rewardCapped?: boolean;
     } | null,
   ): void {
     const panel = this.el('selection-panel');
     if (!panel) return;
 
     // Updated before the early return, so hiding the panel also retires the
-    // action: a hidden button must not keep a stale building id that a stray
-    // click could still dispatch.
+    // actions: a hidden button must not keep a stale id that a stray click
+    // could still dispatch. Each action only ever holds its own kind of id.
     this.setMoveAction(details);
+    this.setRemoveAction(details);
 
     if (!details) {
       panel.hidden = true;
@@ -571,6 +586,56 @@ export class Hud {
     moveButton.setAttribute('aria-label', t('selection.moveNamed', { building: buildingName }));
   }
 
+  /**
+   * Shows the Remove action — and the configured reward — for an obstacle only.
+   *
+   * Buildings keep their own actions (Collect, Upgrade, Move); obstacles never
+   * show those, and buildings never show this. The reward shown is the
+   * *potential* reward from the config; the actual credited amount depends on
+   * storage room at the moment of removal and is reported afterwards.
+   */
+  private setRemoveAction(
+    details: {
+      kind: 'building' | 'obstacle';
+      id: string;
+      entityId?: number;
+      reward?: ResourceAmount;
+      rewardCapped?: boolean;
+    } | null,
+  ): void {
+    const removeButton = this.el('selection-remove') as HTMLButtonElement | null;
+    const rewardLine = this.el('selection-reward');
+    const removable = details?.kind === 'obstacle' && details.entityId !== undefined;
+
+    if (removeButton) {
+      removeButton.hidden = !removable;
+      removeButton.disabled = !removable;
+      if (removable && details !== null && details.entityId !== undefined) {
+        const obstacleName = t(('obstacle.' + details.id) as TranslationKey);
+        removeButton.dataset.obstacleId = String(details.entityId);
+        removeButton.textContent = t('selection.remove');
+        removeButton.setAttribute(
+          'aria-label',
+          t('selection.removeNamed', { obstacle: obstacleName }),
+        );
+      } else {
+        delete removeButton.dataset.obstacleId;
+      }
+    }
+
+    if (rewardLine) {
+      const reward = removable ? details?.reward : undefined;
+      const text = reward === undefined ? '' : formatResourceAmount(reward);
+      rewardLine.hidden = text === '';
+      rewardLine.textContent =
+        text === ''
+          ? ''
+          : t(details?.rewardCapped ? 'obstacle.rewardCapped' : 'obstacle.reward', {
+              reward: text,
+            });
+    }
+  }
+
   private setUpgradePanel(snapshot: BuildingUpgradeSnapshot | undefined, buildingId?: number): void {
     const panel = this.el('selection-upgrade');
     const title = this.el('selection-upgrade-title');
@@ -653,10 +718,8 @@ export class Hud {
   }
 
   private formatUpgradeResources(resources: object): string {
-    const parts = Object.entries(resources)
-      .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && entry[1] > 0)
-      .map((entry) => entry[1] + ' ' + t(('resource.' + entry[0]) as TranslationKey));
-    return parts.length > 0 ? parts.join(' · ') : t('shop.free');
+    const text = formatResourceAmount(resources as ResourceAmount);
+    return text === '' ? t('shop.free') : text;
   }
 
   private formatUpgradeStats(target: BuildingLevel): string {
