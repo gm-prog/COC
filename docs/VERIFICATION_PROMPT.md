@@ -5,6 +5,20 @@ plugin connected to `gm-prog/COC`) so it can independently audit whether Phases 
 actually built as claimed. Everything below is either a hard fact that can be checked against the
 repository, or an explicitly labelled claim.
 
+> **Historical artifact.** This prompt audits the Phase 0/1 baseline and is kept unchanged for
+> the record. For the current verification commands — including the Phase 3 browser smoke test —
+> use:
+>
+> ```bash
+> pnpm install --frozen-lockfile
+> pnpm lint && pnpm typecheck && pnpm test && pnpm test:coverage && pnpm build
+> pnpm exec playwright install chromium   # once per machine
+> pnpm test:e2e                           # browser smoke test (real Chromium + Vite)
+> ```
+>
+> CI runs exactly this list (see `.github/workflows/ci.yml`), and `PROGRESS.md` → Gate C records
+> the latest results.
+
 **Repo:** `https://github.com/gm-prog/COC.git`
 **Branch:** `arena/e9537d2e-coc` (all Phase 0/1 work lives here; `main` is only the initial commit)
 **Spec (authoritative):** `docs/GAME_SPEC.md`
