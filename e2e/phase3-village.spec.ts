@@ -36,7 +36,10 @@ const PLACEMENT_TILE: Tile = { x: 24, y: 24 };
 
 /** Gold Mine level 1: 20 s build, 150 gold, 240 gold/hour, 600 buffer. */
 const CONSTRUCTION_MS = 21_000;
-/** Production window. 240 gold/hour for the ~61 s since completion is 4 gold. */
+/**
+ * Production window: a minute plus the ~5 s the journey spends settling, at 240 gold/hour,
+ * lands on 4 gold (the fifth arrives at 75 s).
+ */
 const PRODUCTION_MS = 60_000;
 /** Gold Mine level 2: 32 s upgrade, 230 gold. */
 const UPGRADE_MS = 33_000;
