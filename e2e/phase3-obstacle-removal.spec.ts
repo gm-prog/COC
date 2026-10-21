@@ -178,11 +178,16 @@ test('the Remove action is not attached to buildings', async ({ page }) => {
 test('removal is refused in a read-only session and nothing is written', async ({ page }) => {
   const browserErrors = collectBrowserErrors(page);
 
-  // No fake clock here: this scenario is about the device clock disagreeing
-  // with the save, so the page runs on real time.
+  // The fake clock is installed here for the same reason as in the other two
+  // journeys: Phaser's animation loop runs on it, so `settle()` really does
+  // give the scene frames to process each half of a tap. The read-only state is
+  // then produced by making the *save* disagree with that clock below, which
+  // exercises the same `clock_behind` path a slow device takes.
+  await page.clock.install({ time: START_TIME });
   await page.goto('/');
   await expect(page.locator('#game canvas')).toBeVisible();
   await expect(page.locator('#resource-gems-value')).toHaveText('50');
+  await freezeClock(page);
 
   // Let the starter village commit, then move its watermark an hour ahead. The
   // record stays a valid v2 save; only the clock disagrees with it, which is
@@ -222,7 +227,12 @@ test('removal is refused in a read-only session and nothing is written', async (
   await expect(page.getByTestId('save-status')).toHaveAttribute('data-save-state', 'clock_behind');
 
   // The obstacle is still selectable — viewing is allowed — but removing it is
-  // refused with the session's own explanation.
+  // refused with the session's own explanation. Confirm the tap lands where it
+  // is meant to before pressing anything: the HUD's own readout is the witness.
+  const rockPoint = tileCenterToPage(await canvasBox(page), ROCK_TILE);
+  await page.mouse.move(rockPoint.x, rockPoint.y);
+  await settle(page);
+  await expect(page.getByTestId('tile')).toHaveText('6, 20');
   await tapTile(page, ROCK_TILE);
   await expect(page.getByTestId('selection-panel')).toBeVisible();
   await expect(page.locator('#selection-title')).toHaveText('Rock');
