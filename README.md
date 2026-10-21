@@ -85,7 +85,13 @@ The village is stored in IndexedDB — database `emberhold`, object store
 - **Failures.** A record that is malformed, newer than this build, or from
   another config is left untouched: the game starts a fresh village in memory
   with saving disabled and shows a short HUD notice. Recovery is possible with a
-  newer build; nothing overwrites a save it could not read.
+  newer build; nothing overwrites a save it could not read. A stored `null` is
+  treated as a malformed record, not as an empty slot: only a missing key starts
+  a new player.
+- **Clock skew.** If the device clock is behind the saved village's
+  `lastSyncAt`, the saved village is shown as-is with saving switched off and a
+  HUD warning. The record is not rewritten and no timestamps are fabricated;
+  commands resume once the clock catches up.
 
 ## Repository layout
 

@@ -530,6 +530,29 @@ starting on a placeholder and swapping it out would let an early tap mutate stat
 discards. And `sim-core` is untouched: `catchUp` still receives an explicit `now`, injected from
 `main.ts`.
 
+**A stored `null` is a record, not an empty slot.** IndexedDB returns `undefined` for a missing
+key, so only `undefined` may mean "new player". A `null` under the key is something a writer
+actually put there; treating it as empty would seed a starter village over it. It goes through
+validation like any other value, is rejected as malformed, and is left in place.
+
+**The whole state is validated, not just its envelope.** The envelope only proves that a record is
+an object with a plausible schema and config version; a save could still carry impossible content —
+a level no config defines, a builder assigned to a building that is not in the save, a negative
+research level — and either crash the restore or leave a village the engine cannot advance.
+`validatePersistedState` now checks the invariants the engine itself relies on: entity ids and
+footprints against the real config and the same placement rules (`isBuildableTile`, `isMapTile`,
+`rectsOverlap`), upgrade targets and builder assignments agreeing with each other, collector
+buffers against the producing level's cap and the state watermark, and queue/research/army
+counters. It reuses `sim-core` helpers rather than duplicating the engine, and adds nothing to
+`sim-core` that only a browser needs.
+
+**A clock behind the save disables saving; it does not reset timers.** `restoreVillage` already
+refused to replay time backwards. Bootstrap now makes that a first-class outcome rather than
+papering over it: the saved village is shown as-is, `autosave` is `null`, the record is untouched,
+and the HUD shows a localised warning. Until `Date.now()` passes `lastSyncAt` the engine's
+monotonic-time rule also refuses commands, which is the honest consequence of not fabricating
+timestamps to get past it.
+
 `fake-indexeddb` is a client devDependency, added through pnpm. It provides a real IndexedDB
 implementation in Node, so the storage tests exercise transactions, `onupgradeneeded` and
 structured cloning rather than a hand-written JSON stub. One additional hand-written double covers
