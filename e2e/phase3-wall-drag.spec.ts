@@ -217,7 +217,8 @@ test('walls stay locked at Keep 1, and a drag cannot sneak one in', async ({ pag
   const { card, choose } = await openWallCard(page);
   await expect(choose).toBeDisabled();
   await expect(card.locator('.shop-item__reason')).toHaveText('Keep 2 required');
-  await expect(card).toContainText('1×1 tiles · 10 Gold · 5s');
+  await expect(card.locator('.shop-item__heading')).toContainText('1×1 tiles');
+  await expect(card.locator('.shop-item__details')).toHaveText('10 Gold · 5s');
 
   // 2. Neither a tap nor a drag can start wall placement: no banner appears,
   //    nothing is spent, no builder is taken and no save is queued.
@@ -324,10 +325,12 @@ test('cancel, a blocked tile and a duplicate crossing all behave honestly', asyn
   await loadKeepTwoVillage(page);
 
   // 1. Escape while the drag is still down: the draft dies, nothing is spent,
-  //    and no revision is written.
+  //    and no revision is written. A restored village has nothing to save yet,
+  //    so the indicator stays idle; the revision is read straight from the
+  //    record the fixture wrote.
   await page.clock.runFor(SAVE_DEBOUNCE_MS);
-  await expect(page.getByTestId('save-status')).toHaveAttribute('data-save-state', 'saved');
   const revisionBefore = await storedRevision(page);
+  expect(revisionBefore).toBe(1);
 
   const { choose } = await openWallCard(page);
   await choose.click();
