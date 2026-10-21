@@ -577,3 +577,86 @@ implementation in Node, so the storage tests exercise transactions, `onupgradene
 structured cloning rather than a hand-written JSON stub. One additional hand-written double covers
 the case the real implementation cannot easily produce: a `put` request that succeeds and a
 transaction that then fails to commit.
+
+## D37 — 2026-10-21 · Persistence is a safety boundary, not a serialisation step
+
+A second pass over the persistence layer, this time auditing it against the simulation it has to
+survive rather than against its own happy path, found six defects. Each one is recorded here with
+the rule that now prevents it.
+
+**Sparse arrays are malformed, not "absent".** Every validator used `Array.prototype.forEach`,
+which skips index holes. A record with `delete state.buildings[3]` therefore validated as if index 3
+had never been mentioned, while `for…of`, `.filter()` and `.map()` downstream all read `undefined`,
+and `findKeep`'s `.find()` visits holes and threw. Arrays in a save are now walked by index, every
+hole is reported as a problem, the remaining entries are still validated individually, and nothing
+is shifted or filled: repairing a malformed save silently would hide the corruption and, in the
+worst case, silently delete a building. Density is part of structural soundness, because the
+`sim-core` Keep helper is gated on it. Note that IndexedDB's structured clone preserves holes
+(`1 in clone === false`), so this is reachable in practice and not only via hand-made JSON.
+
+**Scheduled work must be reachable from the watermark.** `catchUp` completes jobs whose
+`finishAt <= now`, but `nextCompletionAt` ignores timestamps before `state.lastSyncAt`. An upgrade
+or queue item scheduled earlier than the watermark could therefore never complete and its builder
+was never freed — a village permanently one builder short, with no action a player could take. A
+persisted `finishAt` is now required to be `>= state.lastSyncAt`. Equality is the valid boundary,
+not a rejection: `catchUp` applies completions at the cursor first, so `finishAt === lastSyncAt` is
+a job that completes on the next catch-up. The stored timestamp is never adjusted to make a record
+acceptable.
+
+**Research is deliberately not covered by that rule.** `catchUp` has no research completion path at
+all; `nextCompletionAt` considers upgrades and training queues only. Requiring a temporal rule for
+research would invent engine behaviour that does not exist, so its shape and level bounds are
+validated and nothing more. This is a known gap in the simulation, recorded rather than papered
+over with a check that implies coverage the engine does not have.
+
+**Safe integers, and one below the maximum for ids.** `Number.isInteger(2 ** 53)` is `true`, but
+`2 ** 53 + 1 === 2 ** 53`, so an entity id at that value makes `highestEntityId() + 1` produce an
+id that already exists. Ids are now safe integers capped at `Number.MAX_SAFE_INTEGER - 1`, leaving
+room for the allocator to increment. Coordinates, levels, caps, balances, queue lengths, trophy
+counts, tutorial steps, buffer numerators and timestamps are safe integers, non-negative where the
+engine treats them as non-negative, and checked against configured domains (grid bounds, level
+tables, building/queue caps) where the config establishes them. Content that is merely unusual is
+still accepted: the rule is "the engine must be able to compute with this", not "this looks like
+the starter village".
+
+**Counts, Keep requirements and capacity are checked with the engine's own helpers.**
+`limits.buildingCounts` is enforced per type at the player's Keep level, counting buildings under
+construction the way the simulation does, because a save with more Gold Mines than the Keep allows
+would otherwise be a village the engine could never have produced and cannot gate consistently.
+`maxKeeps` is enforced. `requiresKeep` is checked both for completed levels and for the target of
+an in-flight upgrade, against the _completed_ Keep level — an upgrade in flight does not unlock
+anything. Resource balances are checked against `storageCapacity` for the level actually completed
+(an uncapped resource stays uncapped; an absent cap is not treated as zero, and the legitimate
+temporary over-cap state that collection can produce is not rejected). `buildingLimit` was exported
+from `sim-core` for this rather than re-derived in the client, so the boundary and the engine cannot
+drift apart.
+
+**Every write is a compare-and-swap in one transaction.** The revision counter alone only made
+ordering _observable_ within one autosave; two tabs each had a valid counter and the last writer
+silently erased the other's progress. `VillageStorage.write(save, expectedRevision)` now reads the
+stored revision and writes the new record inside a single `readwrite` transaction, so there is no
+check-then-write window. A mismatch is a typed `conflict` carrying the stored revision — never
+reported as a storage failure, because "your browser is broken" is the wrong advice — and the
+autosave enters a terminal state that stops writing and stops presenting in-memory changes as
+durable. An empty store is revision 0, so two tabs cannot both create a village. Sequential writes
+are unaffected. This required a schema bump: the envelope is v2 and carries `revision`; a v1 record
+is migrated in memory and becomes revision 1 on its next save. Nothing is written back under the
+old version number, and v1 saves are never discarded. Connections close on `versionchange` so an
+upgrade in another tab is not blocked forever by this one.
+
+**A failed write must not strand the newest snapshot.** If a change queued while another write was
+in flight, its debounce timer fired inside `ensureLoop` and was consumed joining the running loop.
+When that write then failed, the newest snapshot stayed pending with no timer and no retry — it
+would sit in memory until some unrelated change happened to schedule another save, and would be
+lost on reload. Failures now always arm a bounded retry (2 s doubling to a 60 s cap), so there is
+never a pending snapshot with nothing scheduled, and a store that refuses everything is retried
+slowly rather than hammered. `flush()` overlapping an in-flight write joins it and resolves; the
+snapshot is still written by the retry or by the next flush. `saved` is emitted only from a
+committed transaction and never while a newer snapshot is pending.
+
+**The conflict state is a visual state too.** `clock_behind` had been added to the HUD without a
+style, so a session that had silently stopped saving looked exactly like a healthy one. `conflict`
+and `clock_behind` now share one rule with the other non-durable states, and a test asserts the
+whole set is in that one selector list, so a future state cannot be added without styling. The
+status text and the hint line are asserted to agree, all text goes through `i18n`, and view-only
+interaction (selection, panning, zooming) stays available in both states.

@@ -78,10 +78,23 @@ The village is stored in IndexedDB — database `emberhold`, object store
   replaying or duplicating it.
 - **How.** Writes are debounced and serialized: at most one write is in flight,
   and the newest state always wins. A best-effort flush runs when the page is
-  hidden, but durability does not depend on it.
-- **Format.** The record is versioned by `schemaVersion` (currently `1`),
+  hidden, but durability does not depend on it. A failed write is retried on a
+  capped backoff (2 s doubling to 60 s) rather than waiting for the next
+  unrelated change, so a snapshot is never left pending with nothing scheduled.
+- **Format.** The record is versioned by `schemaVersion` (currently `2`),
   independently of the IndexedDB database version, and carries the
-  `configVersion` it was written against.
+  `configVersion` it was written against. A `revision` is incremented on every
+  write. A version-1 record is migrated in memory to version 2 and written back
+  with revision 1 on the next save; the v1 value itself is never rewritten in
+  place under the old version number.
+- **Two tabs.** Each write is a compare-and-swap: inside one read-write
+  transaction the stored revision is read and the next record is written, with
+  no interleaving possible. A tab whose expected revision no longer matches is
+  refused instead of overwriting the other tab's progress. It reports a conflict
+  (not a storage failure), stops saving, and the HUD goes read-only with a
+  warning telling the player to reload and continue from the newer save. Two
+  tabs opening an empty database cannot both create a village; only the first
+  write succeeds.
 - **Failures.** A record that is malformed, newer than this build, or from
   another config is left untouched: the game starts a fresh village in memory
   with saving disabled and shows a short HUD notice. Recovery is possible with a

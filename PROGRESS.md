@@ -35,8 +35,9 @@ resource totals/storage caps and builder countdowns, and provide a config-driven
 green/red placement previews that commit through sim-core construction rules. Tap-to-collect with
 storage-overflow feedback and the upgrade panel (preview and start) also run through sim-core, and
 the build → wait → collect → upgrade journey now has a real Chromium smoke test (`e2e/`,
-`pnpm test:e2e`). Move controls, obstacle-removal UX, IndexedDB persistence, speed-up/cancel
-controls, progress bars and the Keep 2 completion criterion remain outstanding — see
+`pnpm test:e2e`). The village now persists to IndexedDB with a compare-and-swap write and an
+explicit v1 → v2 migration. Move controls, obstacle-removal UX, speed-up/cancel controls, progress
+bars and the Keep 2 completion criterion remain outstanding — see
 [Gate C](#gate-c--phase-3-client-village-scene--building-ux--in-progress).
 
 | Phase | Title                                | Status         |
@@ -443,7 +444,7 @@ named part · **Fail** = not implemented (or not yet demonstrated).
 | 10  | Obstacle removal                                                                  | **Fail**    | Not exposed in the client.                                                                                                                                                         |
 | 11  | Build/upgrade progress bars                                                       | **Fail**    | Countdown text only; no progress bar.                                                                                                                                              |
 | 12  | Completion toasts                                                                 | **Fail**    | Not implemented.                                                                                                                                                                   |
-| 13  | Local persistence in IndexedDB, autosave, migration versioning                    | **Pass**    | `apps/client/src/persistence/`: schema-v1 envelope, explicit migration dispatch, debounced serialized autosave, `catchUp`-based restore. 67 unit tests plus a browser reload test. |
+| 13  | Local persistence in IndexedDB, autosave, migration versioning                    | **Pass**    | `apps/client/src/persistence/`: schema-v2 envelope with a `revision`, compare-and-swap writes inside one transaction, explicit v1 → v2 migration, debounced serialized autosave with bounded retry and a terminal conflict state, `catchUp`-based restore. 141 unit tests plus a browser reload test. Cross-tab races are proven with two storage instances sharing one real `IDBFactory`, not with two browser windows. Persistence is covered to the degree described in D37; troop, spell and research catalogues are still unvalidated. |
 | 14  | All text via i18n                                                                 | **Pass**    | Every HUD string goes through `apps/client/src/i18n`.                                                                                                                              |
 | 15  | Touch + mouse + keyboard-friendly                                                 | **Partial** | Pan/zoom work with mouse, wheel, pinch, arrows, `+`/`-`/`0`; HUD controls are real `<button>`s. Placement and collection have no keyboard path yet.                                |
 
@@ -465,10 +466,10 @@ named part · **Fail** = not implemented (or not yet demonstrated).
 
 | File                                                                 | Purpose                                                                                                                                |
 | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `apps/client/src/persistence/villageSave.ts`                         | Schema-v1 envelope, storage seam + IndexedDB adapter, migration dispatch, persisted-state validation, and `catchUp`-based restoration. |
-| `apps/client/src/persistence/autosave.ts`                            | Debounced, single-flight autosave with an explicit revision counter and a truthful save status.                                        |
+| `apps/client/src/persistence/villageSave.ts`                         | Schema-v2 envelope, storage seam + IndexedDB adapter, v1 → v2 migration, compare-and-swap writes, persisted-state validation, and `catchUp`-based restoration. |
+| `apps/client/src/persistence/autosave.ts`                            | Debounced, single-flight autosave with bounded retry, a terminal cross-tab conflict state, and a truthful save status.                |
 | `apps/client/src/persistence/bootstrap.ts`                           | Resolves the village before the game is constructed; falls back to an in-memory village when a record must be preserved.               |
-| `apps/client/test/persistence/`                                      | 67 tests across four files: format/validation/migration, real IndexedDB transactions, write ordering, and startup/offline behaviour.   |
+| `apps/client/test/persistence/`                                      | 141 tests across six files: format/validation/migration, real IndexedDB transactions, compare-and-swap races between tabs, write ordering and retry, save-status styling, and startup/offline behaviour. |
 | `apps/client/src/{main,game/createGame}.ts`                          | Bootstrap before constructing Phaser, so no placeholder village can ever be interacted with.                                           |
 | `apps/client/src/scenes/BootScene.ts`                                | Renders the resolved state and schedules saves after accepted commands and catch-up completions.                                       |
 | `apps/client/src/hud.ts`, `index.html`, `styles.css`, `i18n/en.json` | One status line (`role="status"`), hidden unless saving is working or has failed; all text through i18n.                               |
@@ -495,8 +496,8 @@ geometry the test needs was already exported as pure functions.
 | `pnpm install --frozen-lockfile` | **exit 0**  | `fake-indexeddb` added as a client devDependency through pnpm; no hand edits to the lockfile.                                                                    |
 | `pnpm lint`                      | **exit 0**  | Includes the new `persistence/` modules and their tests.                                                                                                         |
 | `pnpm typecheck`                 | **exit 0**  | 7 projects, incl. `e2e/`.                                                                                                                                        |
-| `pnpm test`                      | **exit 0**  | 31 files / 629 tests, including 67 persistence tests.                                                                                                            |
-| `pnpm test:coverage`             | **exit 0**  | 97.68 % stmts · 92.15 % branches · 100 % functions · 97.68 % lines (thresholds unchanged).                                                                       |
+| `pnpm test`                      | **exit 0**  | 34 files / 708 tests, including 141 persistence tests.                                                                                                           |
+| `pnpm test:coverage`             | **exit 0**  | 97.68 % stmts · 92.32 % branches · 100 % functions · 97.68 % lines (thresholds unchanged). This measures `packages/sim-core/src/**/*.ts` only; it says nothing about client persistence. |
 | `pnpm build`                     | **exit 0**  | Client bundle built.                                                                                                                                             |
 | `pnpm test:e2e`                  | **CI only** | The authoring sandbox has no Chromium binary, so this is not claimed locally. `e2e/phase3-village.spec.ts` now lists two tests (journey + reload); CI runs both. |
 | `pnpm format:check`              | **exit 1**  | The same 10 pre-existing files as before this change; every file in this change set is Prettier-clean.                                                           |
@@ -526,12 +527,11 @@ pnpm lint && pnpm typecheck  # typecheck now also covers e2e/ and playwright.con
 
 ## Remaining Phase 3 gaps
 
-1. IndexedDB persistence, autosave and save-version migration (spec item 13).
-2. Move mode and drag-to-place walls (items 6, 7).
-3. Obstacle removal UX (item 10).
-4. Speed-up / cancel controls in the upgrade panel (item 8).
-5. Build/upgrade progress bars and completion toasts (items 11, 12).
-6. Shop categories and the placement pattern overlay (items 4, 5).
-7. Keyboard paths for placement/collection, and unit tests for the placement and selection
+1. Move mode and drag-to-place walls (items 6, 7).
+2. Obstacle removal UX (item 10).
+3. Speed-up / cancel controls in the upgrade panel (item 8).
+4. Build/upgrade progress bars and completion toasts (items 11, 12).
+5. Shop categories and the placement pattern overlay (items 4, 5).
+6. Keyboard paths for placement/collection, and unit tests for the placement and selection
    state machines (items 15, 17).
-8. Keep 2 end-to-end and a 300-object performance measurement (items 18, 19).
+7. Keep 2 end-to-end and a 300-object performance measurement (items 18, 19).
