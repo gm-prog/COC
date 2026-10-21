@@ -11,8 +11,8 @@ all names, art direction and numbers here are ours.
 > **Status:** Phases 0–2 complete (tooling, sim-core foundations, economy and construction).
 > **Phase 3 — village scene and building UX — is in progress.** Rendering, selection, the build
 > shop, placement, moving an existing building, clearing trees and rocks for their reward,
-> collection, upgrades and local IndexedDB persistence work in the browser; drag-to-place walls
-> and the remaining upgrade-panel controls are still outstanding.
+> collection, drag-to-place wall lines, upgrades and local IndexedDB persistence work in the
+> browser; the remaining upgrade-panel controls are still outstanding.
 > Current milestone: **M1 — offline single-player**.
 
 ## Quick start
