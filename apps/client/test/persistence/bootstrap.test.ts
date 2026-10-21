@@ -4,6 +4,7 @@ import { GAME_CONFIG } from '@coc/game-data';
 import { applyCommand, catchUp, createNewPlayerState, type PlayerState } from '@coc/sim-core';
 import { Hud, saveIndicatorForProblem } from '../../src/hud';
 import { t } from '../../src/i18n';
+import { isReadOnlyVillage, runVillageAction } from '../../src/villageActions';
 import {
   bootstrapVillage,
   unsavedVillage,
@@ -115,6 +116,19 @@ async function readRawRecord(factory: IDBFactory): Promise<unknown> {
     });
   } finally {
     db.close();
+  }
+}
+
+/** Returns the stored value untouched, so getters run inside `loadVillage`. */
+class RawStorage implements VillageStorage {
+  constructor(private readonly value: unknown) {}
+
+  async read(): Promise<unknown> {
+    return this.value;
+  }
+
+  async write(): Promise<void> {
+    throw new Error('read-only test double: nothing may be written');
   }
 }
 
@@ -576,8 +590,17 @@ describe('device clock skew', () => {
     expect(indicator.hidden).toBe(false);
     expect(indicator.state).toBe('clock_behind');
     expect(indicator.textContent).toBe(t('save.clockBehind'));
-    expect(indicator.textContent.toLowerCase()).toContain('clock is behind');
-    expect(indicator.textContent.toLowerCase()).toContain('saving is off');
+
+    // The warning has to say all three things: what is wrong, that actions are
+    // unavailable, and what the player can do about it.
+    const warning = indicator.textContent.toLowerCase();
+    expect(warning).toContain('clock is behind');
+    expect(warning).toContain('read-only');
+    expect(warning).toContain('actions are unavailable');
+    expect(warning).toContain('clock is corrected');
+    expect(warning).toContain('reloaded');
+    expect(warning).toContain('nothing has been overwritten');
+
     // The healthy states stay hidden/reassuring only when saving really works.
     expect(indicator.textContent).not.toBe(t('save.saved'));
   });
@@ -614,5 +637,173 @@ describe('device clock skew', () => {
     expect(storage.writes).toBe(1);
     expect((storage.record as VillageSave).state.lastSyncAt).toBe(validAt);
     ahead.autosave?.dispose();
+  });
+});
+
+describe('malformed nested data is a bad record, not a storage outage', () => {
+  /** A save whose `buildings` array looks valid but hides a null entry. */
+  function saveWithNullBuilding(): VillageSave {
+    const save = createSave(
+      placeGoldMine(createNewPlayerState(GAME_CONFIG, START)),
+      GAME_CONFIG.version,
+      START,
+    );
+    // Insert *before* the otherwise valid buildings: the helper used to walk
+    // the array and dereference `null.type` before validation could report it.
+    (save.state.buildings as unknown[]).unshift(null);
+    return save;
+  }
+
+  it('rejects it as malformed and keeps the record', async () => {
+    const record = saveWithNullBuilding();
+    const storage = new MemoryStorage(record);
+
+    const loaded = await loadVillage(storage, GAME_CONFIG);
+    expect(loaded.status).toBe('unreadable');
+    if (loaded.status !== 'unreadable') return;
+    expect(loaded.problem.code).toBe('malformed');
+    expect(loaded.problem.message).toContain('state.buildings[0] is not an object');
+
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START,
+      storage,
+      debounceMs: 0,
+    });
+
+    // Playable in memory...
+    expect(village.source).toBe('unsaved');
+    expect(village.state.buildings.some((building) => building === null)).toBe(false);
+    expect(village.state.resources.gold).toBe(1000);
+    // ...saving stays off, with the honest reason and notice...
+    expect(village.autosave).toBeNull();
+    expect(village.problem?.code).toBe('malformed');
+    expect(renderSaveIndicator(village).state).toBe('unreadable');
+    // ...and the record is untouched.
+    expect(storage.record).toEqual(record);
+    expect(storage.writes).toBe(0);
+  });
+
+  it('classifies a validator exception as malformed rather than storage_unavailable', async () => {
+    // A record whose first property read throws. `migrateSave` touches
+    // `schemaVersion`, so the failure happens inside validation, after the read
+    // succeeded — exactly the case that must not be blamed on IndexedDB.
+    const hostile = {
+      get schemaVersion(): number {
+        throw new Error('hostile getter');
+      },
+    };
+    const storage = new RawStorage(hostile);
+
+    const loaded = await loadVillage(storage, GAME_CONFIG);
+    expect(loaded.status).toBe('unreadable');
+    if (loaded.status !== 'unreadable') return;
+    expect(loaded.problem.code).toBe('malformed');
+    expect(loaded.problem.message).toContain('save could not be validated');
+    expect(loaded.problem.message).toContain('hostile getter');
+
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => START,
+      storage,
+      debounceMs: 0,
+    });
+
+    expect(village.source).toBe('unsaved');
+    expect(village.autosave).toBeNull();
+    // The distinction this test exists for.
+    expect(village.problem?.code).not.toBe('storage_unavailable');
+    expect(village.problem?.code).toBe('malformed');
+    expect(renderSaveIndicator(village).state).toBe('unreadable');
+  });
+});
+
+describe('a clock-behind session is read-only', () => {
+  const saved = catchUpTo(placeGoldMine(createNewPlayerState(GAME_CONFIG, START)), START + 5_000);
+  const record = createSave(saved, GAME_CONFIG.version, saved.lastSyncAt);
+
+  async function clockBehindVillage(): Promise<{
+    village: VillageBootstrap;
+    storage: MemoryStorage;
+  }> {
+    const storage = new MemoryStorage(record);
+    const village = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => saved.lastSyncAt - 60_000,
+      storage,
+      debounceMs: 0,
+    });
+    return { village, storage };
+  }
+
+  it('refuses placement, collection and upgrades without altering the village', async () => {
+    const { village, storage } = await clockBehindVillage();
+    expect(isReadOnlyVillage(village.problem)).toBe(true);
+
+    // `BootScene.getNow()` clamps to the watermark, so these are the exact
+    // arguments a real tap would supply in this session.
+    const now = Math.max(saved.lastSyncAt - 60_000, village.state.lastSyncAt);
+    const context = { config: GAME_CONFIG, now, readOnly: isReadOnlyVillage(village.problem) };
+    const before = JSON.parse(JSON.stringify(village.state)) as PlayerState;
+
+    const goldMine = village.state.buildings.find((building) => building.type === 'gold_mine')!;
+    const keep = village.state.buildings.find((building) => building.type === 'keep')!;
+
+    const attempts = [
+      {
+        id: 'place-1',
+        type: 'PlaceBuilding' as const,
+        // Legal at Keep 1: one gold store, 200 gold, and a free builder.
+        payload: { buildingType: 'gold_store', x: 30, y: 24 },
+      },
+      { id: 'collect-1', type: 'CollectResource' as const, payload: { buildingId: goldMine.id } },
+      { id: 'upgrade-1', type: 'StartUpgrade' as const, payload: { buildingId: keep.id } },
+    ];
+
+    for (const command of attempts) {
+      expect(runVillageAction(village.state, command, context), command.type).toEqual({
+        ok: false,
+        reason: 'read_only',
+      });
+    }
+
+    // Nothing moved: same state, same record, no write.
+    expect(village.state).toEqual(before);
+    expect(village.state.buildings).toHaveLength(saved.buildings.length);
+    expect(storage.record).toEqual(record);
+    expect(storage.writes).toBe(0);
+    expect(village.autosave).toBeNull();
+  });
+
+  it('would accept the same placement once the session is writable', async () => {
+    // Proves the refusal above comes from the gate rather than from a village
+    // that could not have been changed anyway.
+    const { village } = await clockBehindVillage();
+    const whenValid = saved.lastSyncAt + 1;
+    const caught = await bootstrapVillage({
+      config: GAME_CONFIG,
+      now: () => whenValid,
+      storage: new MemoryStorage(record),
+      debounceMs: 0,
+    });
+
+    expect(isReadOnlyVillage(caught.problem)).toBe(false);
+    expect(caught.autosave).not.toBeNull();
+
+    const result = runVillageAction(
+      caught.state,
+      {
+        id: 'place-1',
+        type: 'PlaceBuilding',
+        // Legal at Keep 1: one gold store, 200 gold, and a free builder.
+        payload: { buildingType: 'gold_store', x: 30, y: 24 },
+      },
+      { config: GAME_CONFIG, now: whenValid, readOnly: false },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.state.buildings).toHaveLength(village.state.buildings.length + 1);
+    caught.autosave?.dispose();
   });
 });

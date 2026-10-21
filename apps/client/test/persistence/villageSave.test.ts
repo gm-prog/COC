@@ -295,6 +295,49 @@ describe('persisted state validation', () => {
     expect(validatePersistedState(badFinish, GAME_CONFIG).join()).toContain('finishAt');
   });
 
+  it('reports non-object building entries instead of throwing', () => {
+    // `isKeepLevelConsistent` is typed against `PlayerState` and trusts its
+    // input. A valid-looking array with holes in it used to reach the helper and
+    // throw out of validation, which surfaced as "storage unavailable".
+    for (const junk of [null, 42, 'keep', [], true]) {
+      const broken = structuredCopy(state) as unknown as { buildings: unknown[] };
+      broken.buildings.unshift(junk);
+
+      let problems: string[] = [];
+      expect(
+        () => {
+          problems = validatePersistedState(broken, GAME_CONFIG);
+        },
+        `building entry ${JSON.stringify(junk)}`,
+      ).not.toThrow();
+
+      expect(problems.join(), `building entry ${JSON.stringify(junk)}`).toContain(
+        'state.buildings[0] is not an object',
+      );
+      // The real building behind the junk entry is still checked.
+      expect(problems.join()).not.toContain('state.keepLevel');
+    }
+  });
+
+  it('never throws on arbitrary nested junk', () => {
+    const shapes: Array<(state: PlayerState) => unknown> = [
+      (value) => ({ ...value, buildings: [null] }),
+      (value) => ({ ...value, buildings: [{ ...value.buildings[0], upgrade: null }] }),
+      (value) => ({ ...value, obstacles: [null] }),
+      (value) => ({ ...value, builders: { count: 1, busy: [null] } }),
+      (value) => ({ ...value, trainingQueues: [null] }),
+      (value) => ({ ...value, research: { levels: { barbarian: {} } } }),
+      (value) => ({ ...value, army: { barbarian: null } }),
+      (value) => ({ ...value, lastSyncAt: 'yesterday' }),
+    ];
+
+    for (const shape of shapes) {
+      const broken = shape(structuredCopy(state)) as unknown;
+      expect(() => validatePersistedState(broken, GAME_CONFIG)).not.toThrow();
+      expect(validatePersistedState(broken, GAME_CONFIG).length).toBeGreaterThan(0);
+    }
+  });
+
   it('rejects an inconsistent Keep level', () => {
     const broken = structuredCopy(state);
     const keep = broken.buildings.find((building) => building.type === 'keep');

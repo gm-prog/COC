@@ -391,7 +391,7 @@ export function validatePersistedState(raw: unknown, config: GameConfig): string
     ids: new Set(),
     lastSyncAt: isNonNegativeInteger(raw.lastSyncAt) ? raw.lastSyncAt : undefined,
   };
-  validateBuildings(raw.buildings, config, index, problems);
+  const buildingsSound = validateBuildings(raw.buildings, config, index, problems);
   validateObstacles(raw.obstacles, config, index, problems);
   validateEntityOverlaps(index.rects, problems);
   validateBuilders(raw.builders, index, problems);
@@ -401,11 +401,13 @@ export function validatePersistedState(raw: unknown, config: GameConfig): string
   validateResearch(raw.research, problems);
 
   // Reuses the sim-core invariant rather than re-deriving the Keep rules.
-  if (
-    Array.isArray(raw.buildings) &&
-    index.ids.size > 0 &&
-    !isKeepLevelConsistent(raw as unknown as PlayerState)
-  ) {
+  //
+  // `isKeepLevelConsistent` is typed against `PlayerState` and trusts its input:
+  // it calls `.find((building) => building.type === 'keep')` and compares
+  // `level`. Running it on a raw array that still contains non-objects would
+  // throw out of validation, so it is gated on the structural check above. An
+  // empty array is sound and means "no Keep", which the helper handles.
+  if (buildingsSound && !isKeepLevelConsistent(raw as unknown as PlayerState)) {
     problems.push('state.keepLevel does not match the completed Keep level');
   }
 
@@ -498,25 +500,38 @@ function validateBuildings(
   config: GameConfig,
   index: EntityIndex,
   problems: string[],
-): void {
+): boolean {
   if (!Array.isArray(raw)) {
     problems.push('state.buildings must be an array');
-    return;
+    return false;
   }
 
   const msPerHour = config.economy.msPerHour;
+
+  /**
+   * Whether every entry is a usable `BuildingInstance`.
+   *
+   * The Keep invariant below is a *typed* helper from `sim-core`: it reads
+   * `building.type` and compares levels without re-checking structure. Handing
+   * it this raw array before it is known to be sound is what let a `null` entry
+   * throw out of validation and be mistaken for a storage outage.
+   */
+  let sound = true;
 
   raw.forEach((entry: unknown, position: number) => {
     const at = `state.buildings[${position}]`;
     if (!isRecord(entry)) {
       problems.push(`${at} is not an object`);
+      sound = false;
       return;
     }
 
     if (!isPositiveInteger(entry.id)) {
       problems.push(`${at}.id must be a positive integer`);
+      sound = false;
     } else if (index.ids.has(entry.id)) {
       problems.push(`${at}.id ${entry.id} is duplicated`);
+      sound = false;
     } else {
       index.ids.add(entry.id);
       index.buildingById.set(entry.id, entry);
@@ -528,8 +543,10 @@ function validateBuildings(
         : undefined;
     if (typeof entry.type !== 'string' || entry.type.length === 0) {
       problems.push(`${at}.type must be a non-empty string`);
+      sound = false;
     } else if (def === undefined) {
       problems.push(`${at}.type "${String(entry.type)}" is not defined by this config`);
+      sound = false;
     }
 
     if (def !== undefined) {
@@ -540,6 +557,7 @@ function validateBuildings(
       // must exist in the definition.
       if (!isNonNegativeInteger(entry.level)) {
         problems.push(`${at}.level must be a non-negative integer`);
+        sound = false;
       } else if (entry.level > maxLevel) {
         problems.push(`${at}.level ${entry.level} exceeds "${def.id}" maximum ${maxLevel}`);
       }
@@ -557,6 +575,7 @@ function validateBuildings(
   });
 
   validateWatermarks(index, problems);
+  return sound;
 }
 
 /** Upgrade metadata must describe exactly one step up, into a real level. */
@@ -1104,11 +1123,28 @@ export async function loadVillage(
   // village. It falls through to validation and is rejected as malformed.
   if (raw === undefined) return { status: 'empty' };
 
-  const migrated = migrateSave(raw);
-  if (!migrated.ok) return { status: 'unreadable', problem: migrated.problem };
+  // Boundary around everything that inspects the stored value.
+  //
+  // Validation is written defensively, but it is still code reading attacker-
+  // shaped input: an unexpected throw must be reported as a bad *record*, not
+  // escape and be caught by `main.ts` as "storage unavailable". The two lead to
+  // different messages, and only one of them is true. The record is never
+  // modified here, so it remains recoverable.
+  try {
+    const migrated = migrateSave(raw);
+    if (!migrated.ok) return { status: 'unreadable', problem: migrated.problem };
 
-  const checked = checkSaveEnvelope(migrated.record, config);
-  if (!checked.ok) return { status: 'unreadable', problem: checked.problem };
+    const checked = checkSaveEnvelope(migrated.record, config);
+    if (!checked.ok) return { status: 'unreadable', problem: checked.problem };
 
-  return { status: 'loaded', save: checked.save };
+    return { status: 'loaded', save: checked.save };
+  } catch (error) {
+    return {
+      status: 'unreadable',
+      problem: {
+        code: 'malformed',
+        message: `save could not be validated: ${error instanceof Error ? error.message : String(error)}`,
+      },
+    };
+  }
 }
