@@ -485,3 +485,53 @@ alternative — a `window.__game` handle — would test a different program.
 
 CI runs one worker with no retries. A retry would hide the flakiness this test exists to catch;
 the fixed viewport, fixed clock and single Chromium project are what make one worker enough.
+
+## D36 — Local village persistence
+
+Phase 3 asks for "local persistence in IndexedDB (temporary), autosave on every command, safe
+migration versioning". Six choices shaped it.
+
+**IndexedDB, not `localStorage`.** The spec names IndexedDB, and it is the right tool: the state is
+a structured object rather than a string, writes are transactional, and `localStorage` is
+synchronous — a village saved on the main thread after every command would jank the game.
+
+**Two versions, not one.** The IndexedDB _database_ version describes the on-disk layout (which
+object stores and indexes exist). The record's `schemaVersion` describes the shape of the value
+inside that store. Bumping the database version for every field change would force an
+`onupgradeneeded` round trip, and a blocked-upgrade dance between tabs, for what is only JSON.
+They are therefore independent, and only the envelope changes when the save format changes.
+
+**No invented migration history.** `SAVE_SCHEMA_VERSION` is 1 and no player has ever written
+another format, so the migration registry ships empty. A fictional v0 would mean maintaining a
+format that never existed and testing a conversion nothing produces. The dispatch is still real and
+tested: `migrateSave` takes the registry and a target version, so a test can prove that migrations
+run in order, that a gap in the chain is refused, and that a throwing migration is reported without
+touching the input. When v2 arrives it is one entry in `SAVE_MIGRATIONS`.
+
+**A rejected record is never overwritten.** If the stored save is malformed, from a future schema,
+or written against another config, the game starts a fresh village _in memory_ with saving
+disabled, and the record stays exactly as it was. Seeding a starter village and autosaving it is
+the tempting behaviour and would destroy the player's only copy — the one thing a persistence layer
+must never do.
+
+**Save commands and completions, not ticks.** "Autosave on every state change" would write once a
+second, because `catchUp` accrues collector production every second. It is also unnecessary:
+`buffer.lastAccruedAt` plus the exact `remainder` numerator make production a pure function of
+elapsed time, so a reload recomputes precisely what a live village would have earned. The autosave
+therefore fires after accepted commands (placement, collection, upgrade start) and when `catchUp`
+reports completion events — the changes that are _not_ derivable.
+
+**One write in flight.** The autosave takes the pending snapshot before awaiting the write and
+keeps only the newest queued state, so a slow write can never land on top of a newer one. A
+revision counter makes that ordering observable, and a test stalls the first write to prove it.
+
+Two smaller consequences. The village is resolved _before_ the Phaser game is constructed, because
+starting on a placeholder and swapping it out would let an early tap mutate state the swap then
+discards. And `sim-core` is untouched: `catchUp` still receives an explicit `now`, injected from
+`main.ts`.
+
+`fake-indexeddb` is a client devDependency, added through pnpm. It provides a real IndexedDB
+implementation in Node, so the storage tests exercise transactions, `onupgradeneeded` and
+structured cloning rather than a hand-written JSON stub. One additional hand-written double covers
+the case the real implementation cannot easily produce: a `put` request that succeeds and a
+transaction that then fails to commit.

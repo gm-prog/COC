@@ -10,8 +10,8 @@ all names, art direction and numbers here are ours.
 
 > **Status:** Phases 0–2 complete (tooling, sim-core foundations, economy and construction).
 > **Phase 3 — village scene and building UX — is in progress.** Rendering, selection, the build
-> shop, placement, collection and upgrades work in the browser; IndexedDB persistence, move
-> controls and obstacle removal are still outstanding.
+> shop, placement, collection, upgrades and local IndexedDB persistence work in the browser;
+> move controls, obstacle removal and the remaining upgrade-panel controls are still outstanding.
 > Current milestone: **M1 — offline single-player**.
 
 ## Quick start
@@ -62,6 +62,30 @@ pnpm test:e2e                           # starts Vite on :5173 via webServer
 The HTML report is written to `playwright-report/`; traces, screenshots and video
 are kept only for failing runs under `test-results/`. Both are git-ignored and CI
 uploads them when the job fails.
+
+A second test in the same file reloads the page and checks that the village comes
+back, which is what proves persistence end to end.
+
+## Saving
+
+The village is stored in IndexedDB — database `emberhold`, object store
+`village`, key `current` — and restored when the game loads.
+
+- **When.** After every accepted command (placement, collection, upgrade start)
+  and whenever a construction or upgrade completes. Not on every frame:
+  production that merely accrues is derived from each collector's
+  `lastAccruedAt`, so a reload recomputes exactly what was earned instead of
+  replaying or duplicating it.
+- **How.** Writes are debounced and serialized: at most one write is in flight,
+  and the newest state always wins. A best-effort flush runs when the page is
+  hidden, but durability does not depend on it.
+- **Format.** The record is versioned by `schemaVersion` (currently `1`),
+  independently of the IndexedDB database version, and carries the
+  `configVersion` it was written against.
+- **Failures.** A record that is malformed, newer than this build, or from
+  another config is left untouched: the game starts a fresh village in memory
+  with saving disabled and shows a short HUD notice. Recovery is possible with a
+  newer build; nothing overwrites a save it could not read.
 
 ## Repository layout
 

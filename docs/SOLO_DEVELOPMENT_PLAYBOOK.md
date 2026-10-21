@@ -39,11 +39,12 @@ work is finished and is summarised here rather than repeated._
 - Build future work on short-lived feature branches off `main`, keep CI green on every PR, and
   do not redo completed work because of branch history.
 
-**Immediate task:** Phase 3 is in progress, and the browser smoke test for the
-build → wait/collect → upgrade journey now exists (`e2e/`, `pnpm test:e2e`, wired into CI). The
-next Phase 3 work is what that smoke test still exposes as missing: IndexedDB persistence, move
-mode and drag-to-place walls, obstacle removal, and the remaining upgrade-panel controls. See
-the Gate C checklist in [`PROGRESS.md`](../PROGRESS.md).
+**Immediate task:** Phase 3 is in progress. The browser smoke test for the build →
+wait/collect → upgrade journey exists (`e2e/`, `pnpm test:e2e`, wired into CI), and the village now
+persists locally in IndexedDB with autosave, explicit schema versioning and safe restoration. What
+remains is move mode, drag-to-place walls, obstacle removal, the upgrade panel's speed-up/cancel
+controls, progress bars and toasts, shop categories, and the Keep 2 end-to-end run. See the Gate C
+checklist in [`PROGRESS.md`](../PROGRESS.md).
 
 Because branch state changes over time, verify the current GitHub state before acting on these notes.
 
@@ -57,8 +58,9 @@ The order in `docs/GAME_SPEC.md` is sensible. Preserve the offline single-player
   Done; keep them accurate in each PR instead of catching up later.
 - ~~Add a browser smoke test for the build → collect → upgrade journey.~~ Done:
   `pnpm test:e2e` runs it in CI on Chromium with a mocked clock.
-- Next: local persistence (IndexedDB), move mode, obstacle removal, and the speed-up/cancel
-  controls the upgrade panel still lacks.
+- ~~Save locally in IndexedDB and restore the village after a reload.~~ Done:
+  `apps/client/src/persistence/`, covered by unit tests and a browser reload test.
+- Next: move mode, obstacle removal, and the speed-up/cancel controls the upgrade panel lacks.
 - Configure `main` to require the relevant CI checks and disallow force-pushes where repository settings permit it.
 - Keep the working tree clean and ensure secrets, local databases, and generated build output are not committed.
 
