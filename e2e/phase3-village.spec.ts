@@ -47,6 +47,21 @@ const UPGRADE_MS = 33_000;
 const FREEZE_MARGIN_MS = 2_000;
 /** One frame's worth of simulated time, enough for Phaser to process input. */
 const FRAME_MS = 120;
+/**
+ * Simulated time that covers the autosave debounce (400 ms) with margin.
+ * The debounce is a `setTimeout`, so the fake clock drives it like any other.
+ */
+const SAVE_DEBOUNCE_MS = 1_000;
+/**
+ * How far the clock is pushed after the reload before asserting the restored
+ * upgrade finished.
+ *
+ * Deliberately generous. The save is written partway through the journey, so
+ * whichever point the fake clock resumes from after navigation, 200 s of
+ * simulated time is comfortably past the 32 s upgrade — and buffered gold is
+ * not asserted afterwards, so the extra time cannot skew a check.
+ */
+const POST_RELOAD_ADVANCE_MS = 200_000;
 
 /**
  * Virtual milliseconds of frame time spent after each jump: enough to carry the
@@ -229,4 +244,89 @@ test('a new village can place a Gold Mine, collect its gold and start an upgrade
   await expect(upgradeStatus).toHaveText('Requires Keep level 2');
 
   browserErrors.expectNone('the Phase 3 build → collect → upgrade journey');
+});
+
+/**
+ * The Phase 3 "Done when" claim, part two: the village outlives the page.
+ *
+ * Playwright gives each test a fresh browser context, so IndexedDB starts empty
+ * here and the save written below cannot leak into another test or into the
+ * smoke test above.
+ */
+test('a village survives a page reload', async ({ page }) => {
+  const browserErrors = collectBrowserErrors(page);
+
+  await page.clock.install({ time: START_TIME });
+  await page.goto('/');
+
+  await expect(page.locator('#game canvas')).toBeVisible();
+  await expect(page.locator('#resource-gold-value')).toHaveText('1000 / 1000');
+  await freezeClock(page);
+
+  // 1. Build the same Gold Mine the smoke test uses, and let it finish.
+  await page.getByRole('button', { name: 'Build', exact: true }).click();
+  await page
+    .getByTestId('shop-item-gold_mine')
+    .getByRole('button', { name: 'Choose Gold Mine' })
+    .click();
+
+  const point = tileCenterToPage(await canvasBox(page), PLACEMENT_TILE);
+  await page.mouse.move(point.x, point.y);
+  await settle(page);
+  await expect(page.getByTestId('tile')).toHaveText('24, 24');
+  await page.mouse.down();
+  await settle(page);
+  await page.mouse.up();
+  await settle(page);
+  await expect(page.locator('#resource-gold-value')).toHaveText('850 / 1000');
+
+  await advance(page, CONSTRUCTION_MS);
+  await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
+
+  // 2. Produce, collect through the HUD, then start an upgrade.
+  await tapCanvas(page, point);
+  await advance(page, PRODUCTION_MS);
+  await expect(page.locator('#selection-buffer')).toHaveText('Stored: 4 Gold');
+  await page.locator('#selection-collect').click();
+  await expect(page.locator('#resource-gold-value')).toHaveText('854 / 1000');
+
+  await page.locator('#selection-upgrade-button').click();
+  await expect(page.locator('#resource-gold-value')).toHaveText('624 / 1000');
+  await expect(page.locator('#builders-count')).toHaveText('1 / 2 available');
+  await expect(page.locator('#selection-upgrade-title')).toHaveText('Upgrading to level 2');
+
+  // 3. Wait for a positive signal that the write *committed*. The indicator is
+  //    only set to `saved` from the IndexedDB transaction's `oncomplete`, so
+  //    this is a real confirmation rather than a hopeful pause.
+  await page.clock.runFor(SAVE_DEBOUNCE_MS);
+  await expect(page.getByTestId('save-status')).toHaveAttribute('data-save-state', 'saved');
+  await expect(page.getByTestId('save-status')).toHaveText('Saved');
+
+  // 4. Reload — same browser context, so the same IndexedDB.
+  await page.reload();
+  await expect(page.locator('#game canvas')).toBeVisible();
+
+  // 5. The same village came back: banked gold after the upgrade purchase, a
+  //    busy builder, and the mine still upgrading.
+  await expect(page.locator('#resource-gold-value')).toHaveText('624 / 1000');
+  await expect(page.locator('#builders-count')).toHaveText('1 / 2 available');
+  await expect(page.locator('#builder-countdowns')).toContainText('Gold Mine');
+
+  const restoredPoint = tileCenterToPage(await canvasBox(page), PLACEMENT_TILE);
+  await tapCanvas(page, restoredPoint);
+  await expect(page.locator('#selection-title')).toHaveText('Gold Mine');
+  await expect(page.locator('#selection-meta')).toContainText('Level 1');
+  await expect(page.locator('#selection-upgrade-title')).toHaveText('Upgrading to level 2');
+  await expect(page.locator('#selection-upgrade-status')).toHaveText(
+    'Your builder is working on this building.',
+  );
+
+  // 6. The restored timer still completes, and releases the builder exactly
+  //    once — the finish time survived the reload rather than restarting.
+  await advance(page, POST_RELOAD_ADVANCE_MS);
+  await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
+  await expect(page.locator('#selection-meta')).toContainText('Level 2');
+  await expect(page.locator('#selection-upgrade-title')).toHaveText('Next: level 3');
+
+  browserErrors.expectNone('the reload persistence journey');
 });
