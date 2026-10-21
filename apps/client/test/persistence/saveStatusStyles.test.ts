@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { readOnlyHintFor } from '../../src/hud';
+import { t } from '../../src/i18n';
 
 /**
  * The save-status pill is the only place a player learns that progress is not
@@ -49,5 +51,31 @@ describe('save-status warning styling', () => {
     for (const state of ['idle', 'saving', 'saved']) {
       expect(CSS).not.toContain(`.hud__save-status[data-save-state='${state}']`);
     }
+  });
+});
+
+describe('a read-only hint names the real cause', () => {
+  it('sends a clock-behind session to the clock', () => {
+    const hint = t(readOnlyHintFor('clock_behind'));
+    expect(hint.toLowerCase()).toContain('clock');
+    expect(hint.toLowerCase()).not.toContain('another tab');
+  });
+
+  it('sends a conflicting session to the newer save, not the clock', () => {
+    const hint = t(readOnlyHintFor('conflict'));
+    expect(hint).toBe(t('hud.conflict'));
+    expect(hint.toLowerCase()).toContain('another tab');
+    expect(hint.toLowerCase()).toContain('reload');
+    // The previous bug: a conflict repeated the clock advice, which hid the
+    // only action that recovers the other tab's progress.
+    expect(hint.toLowerCase()).not.toContain('clock');
+  });
+
+  it('never contradicts the status line above it', () => {
+    expect(t('save.conflict')).toContain('read-only');
+    expect(t('save.conflict')).toContain('Nothing from this tab was written');
+    expect(t('save.clockBehind')).toContain('Nothing has been overwritten');
+    expect(readOnlyHintFor('clock_behind')).toBe('hud.readOnly');
+    expect(readOnlyHintFor('conflict')).not.toBe(readOnlyHintFor('clock_behind'));
   });
 });

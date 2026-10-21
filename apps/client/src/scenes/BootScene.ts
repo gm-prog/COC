@@ -26,7 +26,7 @@ import { buildVillageHudSnapshot } from '../villageHud';
 import { previewBuildingPlacement } from '../villagePlacement';
 import { listBuildingShopItems } from '../villageShop';
 import { getBuildingUpgradeSnapshot } from '../villageUpgrade';
-import { saveIndicatorForProblem } from '../hud';
+import { readOnlyHintFor, saveIndicatorForProblem } from '../hud';
 import { isReadOnlyVillage, runVillageAction } from '../villageActions';
 import type { VillageAutosave } from '../persistence/autosave';
 import type { VillageBootstrap } from '../persistence/bootstrap';
@@ -146,6 +146,16 @@ export class BootScene extends Phaser.Scene {
   private readOnly: boolean;
 
   /**
+   * The hint that explains the current read-only state.
+   *
+   * A refused command must repeat the reason the session stopped saving, not a
+   * fixed one: telling a player whose other tab won that their clock is behind
+   * sends them to fix something that is not wrong, and hides the remedy that
+   * would actually work (reload from the newer save).
+   */
+  private readOnlyHintKey: TranslationKey = readOnlyHintFor('clock_behind');
+
+  /**
    * Best-effort flush when the page is being hidden.
    *
    * This is a belt to the autosave's braces, not the durability mechanism: a
@@ -164,6 +174,9 @@ export class BootScene extends Phaser.Scene {
     super({ key: BootScene.KEY });
     this.village = village;
     this.readOnly = isReadOnlyVillage(village.problem);
+    if (this.readOnly && village.problem !== null) {
+      this.readOnlyHintKey = readOnlyHintFor(saveIndicatorForProblem(village.problem.code));
+    }
   }
 
   create(): void {
@@ -210,7 +223,7 @@ export class BootScene extends Phaser.Scene {
         // A conflict is not a transient status: another tab owns a newer
         // record, so this session must stop pretending its changes are durable.
         if (status === 'conflict') {
-          this.enterReadOnly('conflict', 'hud.conflict');
+          this.enterReadOnly('conflict');
           return;
         }
         this.hud.setSaveIndicator(status);
@@ -218,7 +231,7 @@ export class BootScene extends Phaser.Scene {
       // A runtime write failure (quota, revoked permission) is surfaced here;
       // the game keeps running in memory either way.
       this.autosave.setOnError(() => this.hud.setSaveIndicator('blocked'));
-      this.autosave.setOnConflict(() => this.enterReadOnly('conflict', 'hud.conflict'));
+      this.autosave.setOnConflict(() => this.enterReadOnly('conflict'));
       window.addEventListener('pagehide', this.flushOnHide);
       document.addEventListener('visibilitychange', this.onVisibilityChange);
       // A first-time player has a village worth keeping: persist the starter
@@ -248,12 +261,15 @@ export class BootScene extends Phaser.Scene {
    * that can never be stored. Placement mode is cancelled and the hint explains
    * the remedy (reload), matching the startup read-only states.
    */
-  private enterReadOnly(indicator: 'conflict', hintKey: TranslationKey): void {
+  private enterReadOnly(indicator: 'conflict'): void {
+    const hintKey = readOnlyHintFor(indicator);
     if (this.readOnly) {
+      this.readOnlyHintKey = hintKey;
       this.hud.setSaveIndicator(indicator);
       return;
     }
     this.readOnly = true;
+    this.readOnlyHintKey = hintKey;
     if (this.placementType !== null) this.cancelPlacement();
     this.hud.setSaveIndicator(indicator);
     this.hud.setHint(hintKey);
@@ -734,7 +750,7 @@ export class BootScene extends Phaser.Scene {
       { config: GAME_CONFIG, now, readOnly: this.readOnly },
     );
     if (!result.ok) {
-      if (result.reason === 'read_only') this.hud.setHint('hud.readOnly');
+      if (result.reason === 'read_only') this.hud.setHint(this.readOnlyHintKey);
       return;
     }
 
@@ -816,7 +832,7 @@ export class BootScene extends Phaser.Scene {
     );
 
     if (!result.ok) {
-      if (result.reason === 'read_only') this.hud.setHint('hud.readOnly');
+      if (result.reason === 'read_only') this.hud.setHint(this.readOnlyHintKey);
       this.refreshSelectionAfterCatchUp();
       this.hud.setVillageSnapshot(
         buildVillageHudSnapshot(this.playerState, GAME_CONFIG, now),
@@ -837,7 +853,7 @@ export class BootScene extends Phaser.Scene {
     // Entering placement mode is harmless on its own, but the ghost would imply
     // a drop is possible. Refuse up front and say why.
     if (this.readOnly) {
-      this.hud.setHint('hud.readOnly');
+      this.hud.setHint(this.readOnlyHintKey);
       return;
     }
 
@@ -935,7 +951,7 @@ export class BootScene extends Phaser.Scene {
       { config: GAME_CONFIG, now, readOnly: this.readOnly },
     );
     if (!result.ok) {
-      if (result.reason === 'read_only') this.hud.setHint('hud.readOnly');
+      if (result.reason === 'read_only') this.hud.setHint(this.readOnlyHintKey);
       else this.hud.setPlacementFeedback('invalid');
       return;
     }

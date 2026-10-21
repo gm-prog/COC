@@ -36,6 +36,23 @@ const SAVE_INDICATOR_KEYS: Record<SaveIndicator, TranslationKey> = {
 };
 
 /**
+ * The hint that explains *why* a session is read-only.
+ *
+ * The status line and the hint must never disagree: a conflict caused by
+ * another tab has nothing to do with the device clock, and telling the player
+ * to fix the clock hides the one action that recovers their progress — reload.
+ */
+const READ_ONLY_HINT_KEYS: Partial<Record<SaveIndicator, TranslationKey>> = {
+  clock_behind: 'hud.readOnly',
+  conflict: 'hud.conflict',
+};
+
+/** Hint key for a read-only session, keyed by the status it is showing. */
+export function readOnlyHintFor(indicator: SaveIndicator): TranslationKey {
+  return READ_ONLY_HINT_KEYS[indicator] ?? 'hud.readOnly';
+}
+
+/**
  * Maps a load problem to the indicator that explains it.
  *
  * Exported so the scene does not have to know which codes mean "no store" and
