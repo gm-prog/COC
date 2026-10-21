@@ -58,6 +58,7 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Browser smoke test
+        id: browser-smoke
         run: |
           set -o pipefail
           pnpm test:e2e 2>&1 | tee /tmp/e2e.log
@@ -66,8 +67,13 @@ jobs:
       # block, so a browser-test failure is also posted on the pull request:
       # the tail of the Playwright output plus each `error-context.md` page
       # snapshot. A single marker comment is reused and updated in place.
+      #
+      # `failure()` alone is true when *any* earlier step failed, which would
+      # blame the browser test for a lint, typecheck, unit-test, coverage or
+      # build failure that skipped it. Matching on the step's own outcome keeps
+      # the comment (and the artifacts below) tied to the browser test.
       - name: Report browser test failure on the PR
-        if: failure() && github.event_name == 'pull_request'
+        if: failure() && steps.browser-smoke.outcome == 'failure' && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -101,9 +107,11 @@ jobs:
           fi
 
       # Keep the failure evidence: the HTML report plus any traces, screenshots
-      # and video that `playwright.config.ts` retains on failure.
+      # and video that `playwright.config.ts` retains on failure. Scoped to the
+      # browser step for the same reason as the comment above: an unrelated
+      # earlier failure would otherwise run these uploads for nothing.
       - name: Upload Playwright report
-        if: failure()
+        if: failure() && steps.browser-smoke.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
@@ -112,7 +120,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Playwright test artifacts
-        if: failure()
+        if: failure() && steps.browser-smoke.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: playwright-test-results
