@@ -9,7 +9,9 @@ This repository is a **vertical slice → online MVP**, built phase by phase fro
 all names, art direction and numbers here are ours.
 
 > **Status:** Phases 0–2 complete (tooling, sim-core foundations, economy and construction).
-> **Next:** Phase 3 — village scene and building UX.
+> **Phase 3 — village scene and building UX — is in progress.** Rendering, selection, the build
+> shop, placement, collection and upgrades work in the browser; IndexedDB persistence, move
+> controls and obstacle removal are still outstanding.
 > Current milestone: **M1 — offline single-player**.
 
 ## Quick start
@@ -28,19 +30,38 @@ square is the 40×40 buildable area.
 
 ## Commands
 
-| Command                               | What it does                                           |
-| ------------------------------------- | ------------------------------------------------------ |
-| `pnpm dev`                            | Client + API server in parallel                        |
-| `pnpm dev:client`                     | Vite dev server only                                   |
-| `pnpm dev:server`                     | Fastify API only (tsx watch)                           |
-| `pnpm test`                           | Unit tests (Vitest)                                    |
-| `pnpm test:watch`                     | Unit tests in watch mode                               |
-| `pnpm typecheck`                      | `tsc --noEmit` in every workspace project              |
-| `pnpm lint`                           | ESLint across the repo                                 |
-| `pnpm format`                         | Prettier write                                         |
-| `pnpm build`                          | Emit `dist/` for packages + a production client bundle |
-| `pnpm verify`                         | `lint` + `typecheck` + `test` (what CI runs)           |
-| `pnpm --filter @coc/tools start info` | Print version stamps and grid geometry                 |
+| Command                               | What it does                                             |
+| ------------------------------------- | -------------------------------------------------------- |
+| `pnpm dev`                            | Client + API server in parallel                          |
+| `pnpm dev:client`                     | Vite dev server only                                     |
+| `pnpm dev:server`                     | Fastify API only (tsx watch)                             |
+| `pnpm test`                           | Unit tests (Vitest)                                      |
+| `pnpm test:watch`                     | Unit tests in watch mode                                 |
+| `pnpm test:e2e`                       | Browser smoke test (Playwright + Chromium)               |
+| `pnpm typecheck`                      | `tsc --noEmit` in every workspace project                |
+| `pnpm lint`                           | ESLint across the repo                                   |
+| `pnpm format`                         | Prettier write                                           |
+| `pnpm build`                          | Emit `dist/` for packages + a production client bundle   |
+| `pnpm verify`                         | `lint` + `typecheck` + `test` (the unit-test half of CI) |
+| `pnpm --filter @coc/tools start info` | Print version stamps and grid geometry                   |
+
+## Browser smoke test
+
+Phase 3 ships one end-to-end test in `e2e/`: it loads a new village in a real
+Chromium page, opens the build shop, places a Gold Mine on a tile whose
+coordinates come from the client's own isometric helpers, advances **simulated**
+time with Playwright's clock until the build finishes, waits for gold to
+accumulate, collects it through the HUD button, and starts an upgrade. No mocks,
+no direct state access, no real sleeps.
+
+```bash
+pnpm exec playwright install chromium   # once per machine
+pnpm test:e2e                           # starts Vite on :5173 via webServer
+```
+
+The HTML report is written to `playwright-report/`; traces, screenshots and video
+are kept only for failing runs under `test-results/`. Both are git-ignored and CI
+uploads them when the job fails.
 
 ## Repository layout
 
@@ -61,7 +82,9 @@ apps/
   server/             Fastify API
   tools/              developer CLI (base editor, replay, balance sim)
 
-.github/workflows/    CI: lint, typecheck, test, build
+.github/workflows/    CI: lint, typecheck, test, coverage, build, browser smoke test
+e2e/                  Playwright browser smoke test (Phase 3)
+playwright.config.ts  Playwright config: Chromium, fixed viewport, Vite webServer
 ```
 
 ## Architecture in one paragraph

@@ -1,0 +1,156 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+import { t } from '../apps/client/src/i18n';
+import { screenToTileFloor, TILE_HEIGHT, TILE_WIDTH } from '../apps/client/src/iso';
+import {
+  centerOnWorld,
+  worldSizeForGrid,
+  type CameraTransform,
+} from '../apps/client/src/cameraTransform';
+import { GRID } from '../packages/sim-core/src/config/geometry';
+import { tileCenterToPage } from '../e2e/support/villageGeometry';
+
+/**
+ * Browser-free guards for `e2e/phase3-village.spec.ts`.
+ *
+ * The Playwright suite needs a Chromium binary, which some environments cannot
+ * provide (CI installs one; a locked-down sandbox may not). These tests cover
+ * the two things that can break the browser test without the browser itself:
+ *
+ * 1. the tile → page coordinate maths, and
+ * 2. the DOM ids, test ids and English strings the spec asserts against.
+ *
+ * They do **not** replace the browser test — only the browser proves Phaser's
+ * canvas, the clock and the HUD behave together.
+ */
+
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+const read = (relative: string): string => readFileSync(`${repoRoot}${relative}`, 'utf8');
+
+/** The fixed viewport from `playwright.config.ts`. */
+const VIEWPORT = { width: 1280, height: 800 };
+const WORLD = worldSizeForGrid(GRID.total, TILE_WIDTH, TILE_HEIGHT);
+
+/** The camera `BootScene.recenter()` installs at boot: zoom 1, centred on the map. */
+const BOOT_CAMERA: CameraTransform = centerOnWorld({
+  viewWidth: VIEWPORT.width,
+  viewHeight: VIEWPORT.height,
+  worldWidth: WORLD.worldWidth,
+  worldHeight: WORLD.worldHeight,
+});
+
+describe('browser test geometry: tile centres on the canvas', () => {
+  const canvas = { x: 0, y: 0, ...VIEWPORT };
+
+  it('maps the placement tile to the middle of the viewport', () => {
+    // The smoke test places at (24, 24): the world origin lands on the screen
+    // centre horizontally, so this tile is dead centre of a 1280×800 canvas.
+    expect(tileCenterToPage(canvas, { x: 24, y: 24 })).toEqual({ x: 640, y: 416 });
+  });
+
+  it('keeps the camera the scene actually installs', () => {
+    // centerOnWorld: panX = viewWidth/2; panY = viewHeight/2 − worldHeight/2.
+    expect(BOOT_CAMERA).toEqual({ zoom: 1, panX: 640, panY: 400 - WORLD.worldHeight / 2 });
+  });
+
+  it('offsets every point by the canvas origin inside the page', () => {
+    const offset = { x: 10, y: 20, ...VIEWPORT };
+    expect(tileCenterToPage(offset, { x: 24, y: 24 })).toEqual({ x: 650, y: 436 });
+  });
+
+  it('round-trips every buildable tile through the game’s own inverse projection', () => {
+    // Phaser turns a pointer position into a tile with exactly this path:
+    // screen − pan, then screenToTileFloor. Every buildable tile centre must
+    // land back on the tile it started from, or a click would place elsewhere.
+    // Not every tile is on screen at this viewport (the map is 48×48 and the
+    // camera can pan), so visibility is asserted separately below.
+    for (let x = GRID.margin; x < GRID.margin + GRID.buildable; x += 1) {
+      for (let y = GRID.margin; y < GRID.margin + GRID.buildable; y += 1) {
+        const point = tileCenterToPage(canvas, { x, y });
+        const tile = screenToTileFloor(point.x - BOOT_CAMERA.panX, point.y - BOOT_CAMERA.panY);
+        expect(tile, `tile ${x},${y} → page ${point.x},${point.y}`).toEqual({ x, y });
+      }
+    }
+  });
+
+  it('keeps the placement tile and its neighbours on screen', () => {
+    // The tile the smoke test clicks, plus the 3×3 footprint it occupies, must
+    // be inside the viewport and clear of the HUD panels. The HUD lives at the
+    // top-left banner, the top-right shop, and the bottom third; (24, 24) lands
+    // in the middle, which is why it was chosen.
+    for (let x = 24; x <= 26; x += 1) {
+      for (let y = 24; y <= 26; y += 1) {
+        const point = tileCenterToPage(canvas, { x, y });
+        expect(point.x).toBeGreaterThan(320);
+        expect(point.x).toBeLessThan(960);
+        expect(point.y).toBeGreaterThan(200);
+        expect(point.y).toBeLessThan(700);
+      }
+    }
+  });
+});
+
+describe('browser test contract: DOM hooks and copy', () => {
+  const spec = read('e2e/phase3-village.spec.ts');
+  const html = read('apps/client/index.html');
+  const hudSource = read('apps/client/src/hud.ts');
+
+  const specIds = new Set([...spec.matchAll(/locator\('#([a-zA-Z0-9_-]+)/g)].map((m) => m[1]));
+  const specTestIds = new Set(
+    [...spec.matchAll(/getByTestId\('([a-zA-Z0-9_-]+)'\)/g)].map((m) => m[1]),
+  );
+
+  it('finds the selectors it is supposed to check', () => {
+    // Guards the extractors above: an empty set would make the checks vacuous.
+    expect(specIds.size).toBeGreaterThanOrEqual(15);
+    expect(specTestIds.size).toBeGreaterThanOrEqual(5);
+  });
+
+  it('references only ids that exist in index.html', () => {
+    for (const id of specIds) {
+      expect(html, `#${id} is missing from apps/client/index.html`).toContain(`id="${id}"`);
+    }
+  });
+
+  it('references only test ids that exist in index.html or are generated by the HUD', () => {
+    for (const testId of specTestIds) {
+      if (html.includes(`data-testid="${testId}"`)) continue;
+      // The shop cards are built at runtime: `shop-item-<building id>`.
+      expect(testId.startsWith('shop-item-'), `unknown test id ${testId}`).toBe(true);
+      expect(hudSource).toContain(`'shop-item-' + item.id`);
+    }
+  });
+
+  it('asserts strings that the i18n dictionary actually produces', () => {
+    // Every user-visible string the browser test matches, rendered from en.json.
+    // A wording change fails here instead of in a browser run.
+    expect(t('shop.title')).toBe('Build');
+    expect(t('building.gold_mine')).toBe('Gold Mine');
+    expect(t('shop.selectNamed', { building: t('building.gold_mine') })).toBe('Choose Gold Mine');
+    expect(t('shop.size', { width: 3, height: 3 })).toBe('3×3 tiles');
+    expect(t('shop.seconds', { seconds: 20 })).toBe('20s');
+    expect(t('resource.gold')).toBe('Gold');
+    expect(t('placement.title', { building: t('building.gold_mine') })).toBe('Place Gold Mine');
+    expect(t('placement.valid')).toBe('Valid spot');
+    expect(t('hud.zoneBuildable')).toBe('Buildable');
+    expect(t('selection.meta.building', { level: 1, x: 24, y: 24 })).toBe('Level 1 · Tile 24, 24');
+    expect(t('selection.buffer', { amount: 4, resource: t('resource.gold') })).toBe(
+      'Stored: 4 Gold',
+    );
+    expect(t('selection.collectNamed', { amount: 4, resource: t('resource.gold') })).toBe(
+      'Collect 4 Gold',
+    );
+    expect(t('upgrade.nextLevel', { level: 2 })).toBe('Next: level 2');
+    expect(t('upgrade.costAndTime', { cost: '230 Gold', duration: '32s' })).toBe(
+      'Cost: 230 Gold · Time: 32s',
+    );
+    expect(t('upgrade.available')).toBe('Ready to upgrade');
+    expect(t('upgrade.inProgress', { level: 2 })).toBe('Upgrading to level 2');
+    expect(t('upgrade.remaining', { duration: '32s' })).toBe('Time remaining: 32s');
+    expect(t('upgrade.working')).toBe('Your builder is working on this building.');
+    expect(t('upgrade.keepLevel', { level: 2 })).toBe('Requires Keep level 2');
+    expect(t('builders.available', { available: 2, total: 2 })).toBe('2 / 2 available');
+    expect(t('resource.amountCapacity', { amount: 1000, capacity: 1000 })).toBe('1000 / 1000');
+  });
+});

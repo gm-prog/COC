@@ -32,9 +32,12 @@ Design source of truth: [`docs/GAME_SPEC.md`](docs/GAME_SPEC.md).
 
 Phase 3 is underway. Shipped slices render/select starter buildings and obstacles, show
 resource totals/storage caps and builder countdowns, and provide a config-driven build shop with
-green/red placement previews that commit through sim-core construction rules. The current slice adds tap-to-collect with storage-overflow feedback and previews/starts
-building upgrades through sim-core. Move controls, obstacle-removal UX, IndexedDB persistence, and a
-browser end-to-end smoke test remain outstanding.
+green/red placement previews that commit through sim-core construction rules. Tap-to-collect with
+storage-overflow feedback and the upgrade panel (preview and start) also run through sim-core, and
+the build → wait → collect → upgrade journey now has a real Chromium smoke test (`e2e/`,
+`pnpm test:e2e`). Move controls, obstacle-removal UX, IndexedDB persistence, speed-up/cancel
+controls, progress bars and the Keep 2 completion criterion remain outstanding — see
+[Gate C](#gate-c--phase-3-client-village-scene--building-ux--in-progress).
 
 | Phase | Title                                | Status         |
 | ----- | ------------------------------------ | -------------- |
@@ -405,4 +408,105 @@ No Date.now(), no Math.random(), no DOM, no fs, no network. Stable iteration by 
 
 ## Next permitted phase
 
+> **Historical snapshot (2026-10-19, written at the end of Gate B).** Phase 3 has since
+> started; this line described the state of the repository when Gate B closed and is kept
+> for the record. See **Gate C** below for the current status.
+
 Phase 3 (client / rendering) — not started.
+
+---
+
+# Gate C — Phase 3 (client: village scene & building UX) · IN PROGRESS
+
+**Goal (spec):** a player can build and manage a village in the browser.
+**This slice:** a real browser-level Playwright smoke test for the Phase 3 journey, plus the
+verification and CI wiring it needs. No simulation or balance rules were changed.
+
+## Phase 3 acceptance checklist
+
+Status legend: **Pass** = implemented and verified · **Partial** = implemented but missing a
+named part · **Fail** = not implemented (or not yet demonstrated).
+
+### Build
+
+| #   | Spec item                                                                         | Result      | Notes                                                                                                                                               |
+| --- | --------------------------------------------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Render buildings (placeholder shapes), obstacles, walls                           | **Pass**    | `listVillageEntities` draws every configured entity back-to-front; walls are ordinary 1×1 buildings today.                                          |
+| 2   | Selection with range ring and info panel                                          | **Partial** | Selection outline + info/upgrade panel work; there is no range ring (no building has a range/attack radius in Phase 3 config).                      |
+| 3   | HUD: resource bars with caps, builder icons with countdowns, gem counter          | **Pass**    | `#village-hud`: gold/essence bars with `aria-valuenow`, shards/gems counters, per-builder icons and countdown list.                                 |
+| 4   | Shop with categories; locked items show the unlock requirement                    | **Partial** | Shop is a flat list (no categories); locked items show "Keep N required", limit, cost, builder and resource reasons.                                |
+| 5   | Placement ghost (green/red + pattern)                                             | **Partial** | Green/red footprint and banner text; no hatch/pattern overlay.                                                                                      |
+| 6   | Move mode                                                                         | **Fail**    | `MoveBuilding` exists in sim-core but has no client control.                                                                                        |
+| 7   | Drag-to-place walls                                                               | **Fail**    | Walls are placed one placement at a time.                                                                                                           |
+| 8   | Upgrade panel: cost, time, resulting stats, builder availability, speed-up button | **Partial** | Cost, time, stats and block reason are shown; there is no speed-up/cancel button.                                                                   |
+| 9   | Tap-to-collect with floating numbers                                              | **Pass**    | Tap collects (or the HUD **Collect** button); a floating canvas number reports accepted/overflow.                                                   |
+| 10  | Obstacle removal                                                                  | **Fail**    | Not exposed in the client.                                                                                                                          |
+| 11  | Build/upgrade progress bars                                                       | **Fail**    | Countdown text only; no progress bar.                                                                                                               |
+| 12  | Completion toasts                                                                 | **Fail**    | Not implemented.                                                                                                                                    |
+| 13  | Local persistence in IndexedDB, autosave, migration versioning                    | **Fail**    | The village lives in memory only; a reload starts a new village.                                                                                    |
+| 14  | All text via i18n                                                                 | **Pass**    | Every HUD string goes through `apps/client/src/i18n`.                                                                                               |
+| 15  | Touch + mouse + keyboard-friendly                                                 | **Partial** | Pan/zoom work with mouse, wheel, pinch, arrows, `+`/`-`/`0`; HUD controls are real `<button>`s. Placement and collection have no keyboard path yet. |
+
+### Tests
+
+| #   | Spec item                                                                      | Result   | Notes                                                                                                                                         |
+| --- | ------------------------------------------------------------------------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| 16  | Playwright smoke: new game → place mine → wait (mock time) → collect → upgrade | **Pass** | `e2e/phase3-village.spec.ts`, one Chromium worker, real Vite client, `page.clock` for time. Green in CI run 39568079376.                      |
+| 17  | Unit tests for UI state machines (placement mode, selection)                   | **Fail** | The client's unit tests cover `iso` and `cameraTransform` only; placement/selection live in `BootScene` and are exercised end-to-end instead. |
+
+### Done when
+
+| #   | Spec item                                                                         | Result      | Notes                                                                                                                                                                  |
+| --- | --------------------------------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 18  | A new player can reach Keep 2 in the browser with correct timers, caps and gating | **Fail**    | Not demonstrated. The smoke test proves one build/collect/upgrade cycle; reaching Keep 2 also needs the Keep upgrade path end-to-end and persistence across a session. |
+| 19  | 60 FPS with 300 placed objects; no console errors                                 | **Partial** | "No console errors" is asserted by the smoke test (`pageerror` + `console.error`). No 300-object performance measurement exists yet.                                   |
+
+## What this slice added
+
+| File                             | Purpose                                                                                                                                                  |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `playwright.config.ts`           | Chromium-only config: fixed 1280×800 viewport, bounded timeouts, one worker, no retries, Vite `webServer` on `:5173`, HTML report + failure-only traces. |
+| `e2e/phase3-village.spec.ts`     | The journey: new village → shop → Gold Mine placement → construction → production → HUD collect → upgrade start → upgrade completion.                    |
+| `e2e/support/villageGeometry.ts` | Tile → page coordinates, reusing `iso.ts`, `cameraTransform.ts` and `GRID` rather than hard-coding pixels.                                               |
+| `e2e/support/browserErrors.ts`   | Fails the test on `pageerror` or `console.error` (only the browser's own `/favicon.ico` 404 is ignored).                                                 |
+| `tsconfig.e2e.json`              | Type-checks the browser tests and the Playwright config.                                                                                                 |
+| `test/e2e-contract.test.ts`      | Browser-free guards: tile → page maths round-tripped over all 1,600 buildable tiles, plus every DOM id, test id and English string the spec asserts.     |
+| `.github/workflows/ci.yml`       | Installs Chromium (`--with-deps`), runs `pnpm test:e2e`, uploads the report and artifacts on failure.                                                    |
+
+No client production code was changed: the HUD was already accessible, and the
+geometry the test needs was already exported as pure functions.
+
+## Verification (this slice)
+
+| Command                          | Result                    | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| -------------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile` | **exit 0**                | Lockfile updated by pnpm when `@playwright/test` was added; no hand edits.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm lint`                      | **exit 0**                | Includes `e2e/`, `playwright.config.ts` and `tsconfig.e2e.json`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm typecheck`                 | **exit 0**                | Now also runs `tsc -p tsconfig.e2e.json` (7 projects total).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test`                      | **exit 0**                | 27 files / 562 tests, including 9 new `test/e2e-contract.test.ts` guards. Vitest collects no `e2e/*.spec.ts`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `pnpm test:coverage`             | **exit 0**                | 97.68 % stmts · 92.14 % branches · 100 % functions · 97.68 % lines (thresholds 90/85/90/90, unchanged).                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm build`                     | **exit 0**                | 6/6 projects; client bundle built in 8.82 s.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test:e2e`                  | **passes in CI**          | Run 39568079376: `Install Playwright browser` + `Browser smoke test` green, whole job 1m44s. Not runnable in the authoring sandbox — Playwright's browser download is blocked there (`cdn.playwright.dev` → `ECONNRESET`) and the image has no system Chromium or NSS libraries, so a local run stops at `browserType.launch: Executable doesn't exist … chromium_headless_shell-1248` (the `webServer` half is proven: Vite serves `:5173`). The first CI run timed out because the long waits painted every frame; the test now fast-forwards and runs ~1 s of frames per jump. |
+| `pnpm format:check`              | **exit 1 (pre-existing)** | 10 warnings, all in files untouched here (`apps/client/src/*`, `index.html`, `styles.css`, `PHASE2_REPORT.md`, `limits.json`); each also fails on `d375b3b`. Every file in this change set is Prettier-clean.                                                                                                                                                                                                                                                                                                                                                                     |
+
+## Verification instructions
+
+```bash
+pnpm install                 # dependencies (Playwright is a root devDependency, pinned)
+pnpm exec playwright install chromium   # browser binary, once per machine
+pnpm test                    # Vitest unit tests (does not collect e2e/*.spec.ts)
+pnpm test:e2e                # browser smoke test; starts Vite on :5173
+pnpm lint && pnpm typecheck  # typecheck now also covers e2e/ and playwright.config.ts
+```
+
+## Remaining Phase 3 gaps
+
+1. IndexedDB persistence, autosave and save-version migration (spec item 13).
+2. Move mode and drag-to-place walls (items 6, 7).
+3. Obstacle removal UX (item 10).
+4. Speed-up / cancel controls in the upgrade panel (item 8).
+5. Build/upgrade progress bars and completion toasts (items 11, 12).
+6. Shop categories and the placement pattern overlay (items 4, 5).
+7. Keyboard paths for placement/collection, and unit tests for the placement and selection
+   state machines (items 15, 17).
+8. Keep 2 end-to-end and a 300-object performance measurement (items 18, 19).

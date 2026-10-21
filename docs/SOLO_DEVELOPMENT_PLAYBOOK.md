@@ -26,15 +26,24 @@ Established developers' lessons that are useful for a solo project:
 
 The goal is not to imitate a large studio's process. Keep only the lightweight habits that reduce rework and shorten feedback loops.
 
-## Repository baseline and immediate housekeeping
+## Repository baseline and current task
 
-At the time this playbook was written:
+_Updated 21 October 2026. This section previously described the pre-Phase-3 housekeeping; that
+work is finished and is summarised here rather than repeated._
 
-- PR #1, **Phase 2 economy and construction**, had been merged into `arena/e9537d2e-coc`.
-- `main` was still at the initial commit and did not yet contain the Phase 1 + Phase 2 baseline.
-- `PROGRESS.md` and `README.md` had stale status statements that did not reflect the completed work.
+- The Phase 1 + Phase 2 baseline, and every Phase 3 slice since, is merged into `main`
+  (PRs #1–#9 at the time of writing). `main` is the stable source of truth; PR #1 was merged
+  from the old `arena/` branch, so no long-lived branch carries unmerged work.
+- `PROGRESS.md`, `README.md` and this playbook are the living status; they are updated in the
+  same PR as the work they describe.
+- Build future work on short-lived feature branches off `main`, keep CI green on every PR, and
+  do not redo completed work because of branch history.
 
-Before substantial Phase 3 work, reconcile the status documents and integrate the tested baseline into `main` through a deliberate, reviewed PR. Confirm CI on that PR. Then treat `main` as the stable source of truth and build future work on short-lived feature branches. Do not redo completed work just because the branch arrangement needs housekeeping.
+**Immediate task:** Phase 3 is in progress, and the browser smoke test for the
+build → wait/collect → upgrade journey now exists (`e2e/`, `pnpm test:e2e`, wired into CI). The
+next Phase 3 work is what that smoke test still exposes as missing: IndexedDB persistence, move
+mode and drag-to-place walls, obstacle removal, and the remaining upgrade-panel controls. See
+the Gate C checklist in [`PROGRESS.md`](../PROGRESS.md).
 
 Because branch state changes over time, verify the current GitHub state before acting on these notes.
 
@@ -42,11 +51,14 @@ Because branch state changes over time, verify the current GitHub state before a
 
 The order in `docs/GAME_SPEC.md` is sensible. Preserve the offline single-player milestone (Phases 0–6) before investing in cloud accounts and PvP.
 
-### Immediate — stabilize the repository
+### Immediate — finish the village interaction layer
 
-- Reconcile `PROGRESS.md`, `PHASE2_REPORT.md`, and `README.md` with the actual merged state.
-- Open and review an integration PR from the branch containing the tested Phase 1 + Phase 2 baseline into `main`.
-- Verify that CI passes and the intended files/commits are included before merging.
+- ~~Reconcile the status documents and merge the tested Phase 1 + Phase 2 baseline into `main`.~~
+  Done; keep them accurate in each PR instead of catching up later.
+- ~~Add a browser smoke test for the build → collect → upgrade journey.~~ Done:
+  `pnpm test:e2e` runs it in CI on Chromium with a mocked clock.
+- Next: local persistence (IndexedDB), move mode, obstacle removal, and the speed-up/cancel
+  controls the upgrade panel still lacks.
 - Configure `main` to require the relevant CI checks and disallow force-pushes where repository settings permit it.
 - Keep the working tree clean and ensure secrets, local databases, and generated build output are not committed.
 
@@ -55,6 +67,7 @@ The order in `docs/GAME_SPEC.md` is sensible. Preserve the offline single-player
 Complete the browser experience for the economy and construction rules that already exist. Keep placeholder visuals for now.
 
 Build in small, reviewable slices, such as:
+
 1. Render buildings, obstacles, and walls; support selection and an information panel.
 2. Show resource totals and capacity, builders, construction timers, and progress.
 3. Add placement feedback, placement/move modes, construction, upgrades, and collection.
@@ -84,14 +97,14 @@ After the offline game is coherent and worth replaying, move to accounts/cloud s
 
 ## A lightweight weekly workflow for one person
 
-| Stage | Routine |
-| --- | --- |
-| **Choose** | Pick one player-visible outcome. Write down how you will prove it works. |
-| **Plan** | Identify the affected files, rules, tests, and known risks before coding. |
-| **Implement** | Use one short-lived feature branch and make one cohesive change at a time. |
-| **Verify** | Add appropriate rule tests. Run lint, typecheck, tests, and build; test the actual browser interaction where relevant. |
-| **Integrate** | Open a PR, inspect the diff, confirm CI passes, then merge. Avoid combining unrelated changes. |
-| **Learn** | Play the build. Write down the three most important problems and choose the next task based on them. |
+| Stage         | Routine                                                                                                                |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **Choose**    | Pick one player-visible outcome. Write down how you will prove it works.                                               |
+| **Plan**      | Identify the affected files, rules, tests, and known risks before coding.                                              |
+| **Implement** | Use one short-lived feature branch and make one cohesive change at a time.                                             |
+| **Verify**    | Add appropriate rule tests. Run lint, typecheck, tests, and build; test the actual browser interaction where relevant. |
+| **Integrate** | Open a PR, inspect the diff, confirm CI passes, then merge. Avoid combining unrelated changes.                         |
+| **Learn**     | Play the build. Write down the three most important problems and choose the next task based on them.                   |
 
 Keep a tiny task board with only **Now**, **Next**, and **Later**. Put one substantial feature in **Now**. A large idea can stay in **Later** until the current game earns it.
 
@@ -127,7 +140,7 @@ Use this list to guide the next steps. Update it as repository state changes.
 - [x] Review an integration PR that brings the tested Phase 1 + Phase 2 baseline into `main`; verify CI before merging.
 - [ ] Configure appropriate required CI checks and prevent force-pushes on `main`, where settings permit.
 - [x] Break Phase 3 into small PRs, beginning with visible buildings and selection, then placement and construction interactions.
-- [ ] Add a browser smoke test for the build → collect → upgrade journey.
+- [x] Add a browser smoke test for the build → collect → upgrade journey (`e2e/`, `pnpm test:e2e`).
 - [ ] Finish and playtest the complete offline loop through Phases 4–6 before starting cloud accounts or PvP.
 
 ## Research sources

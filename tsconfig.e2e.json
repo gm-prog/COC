@@ -1,0 +1,9 @@
+{
+  "//": "Type-checks the Playwright browser tests and their config. Kept separate from tsconfig.base.json because those run in Node against a browser, so they need the DOM lib and the Playwright types.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"]
+  },
+  "include": ["e2e/**/*.ts", "playwright.config.ts"]
+}
