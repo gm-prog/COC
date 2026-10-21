@@ -155,6 +155,21 @@ async function storedRevision(page: Page): Promise<number> {
 }
 
 /**
+ * Long jumps use `fastForward`, which fires each due timer at most once.
+ *
+ * `runFor` drains every animation frame in the window; with a paused clock and
+ * a scene that renders on `requestAnimationFrame`, a six-second jump means
+ * hundreds of frames per call and the suite spent minutes replaying them (once
+ * long enough for the test timeout to fire inside `runFor`). A builder or a
+ * debounce only needs the timer to fire once, so one frame afterwards
+ * (`settle`) is enough to refresh the HUD.
+ */
+async function jump(page: Page, ms: number): Promise<void> {
+  await page.clock.fastForward(ms);
+  await settle(page);
+}
+
+/**
  * Waits until a commit newer than `previous` is in IndexedDB.
  *
  * `expect.poll` runs its interval in Node, so it keeps retrying while the
@@ -184,7 +199,7 @@ async function loadKeepTwoVillage(page: Page): Promise<void> {
 
   // The starter is persisted immediately on first boot; wait for the commit, so
   // the overwrite below cannot race a pending write.
-  await page.clock.runFor(SAVE_DEBOUNCE_MS);
+  await jump(page, SAVE_DEBOUNCE_MS);
   await waitForRevisionAfter(page, 0);
 
   const now = await page.evaluate(() => Date.now());
@@ -223,7 +238,7 @@ test('walls stay locked at Keep 1, and a drag cannot sneak one in', async ({ pag
   await expect(page.locator('#resource-gold-value')).toHaveText('1000 / 1000');
   await freezeClock(page);
 
-  await page.clock.runFor(SAVE_DEBOUNCE_MS);
+  await jump(page, SAVE_DEBOUNCE_MS);
   await waitForRevisionAfter(page, 0);
   const revisionBefore = await storedRevision(page);
 
@@ -249,7 +264,7 @@ test('walls stay locked at Keep 1, and a drag cannot sneak one in', async ({ pag
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
   await expect(page.locator('#builder-countdowns')).toBeHidden();
 
-  await page.clock.runFor(SAVE_DEBOUNCE_MS);
+  await jump(page, SAVE_DEBOUNCE_MS);
   expect(await storedRevision(page)).toBe(revisionBefore);
 
   browserErrors.expectNone('the locked-wall scenario');
@@ -299,8 +314,7 @@ test('a wall line is dragged, saved and restored; mode stays open', async ({ pag
   await hoverTile(page, CAMERA_PROBE);
 
   // 5. Builders finish, and a second stroke needs no trip back to the shop.
-  await page.clock.runFor(WALL_FINISH_MS);
-  await settle(page);
+  await jump(page, WALL_FINISH_MS);
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
   await dragTiles(page, SECOND_STROKE);
 
@@ -310,10 +324,9 @@ test('a wall line is dragged, saved and restored; mode stays open', async ({ pag
   await expect(page.locator('#placement-banner')).toBeVisible();
 
   // 6. Let both walls finish, wait for the write to commit, then reload.
-  await page.clock.runFor(WALL_FINISH_MS);
-  await settle(page);
+  await jump(page, WALL_FINISH_MS);
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
-  await page.clock.runFor(SAVE_DEBOUNCE_MS);
+  await jump(page, SAVE_DEBOUNCE_MS);
   await waitForRevisionAfter(page, revisionAtLoad);
 
   await page.reload();
@@ -345,7 +358,7 @@ test('cancel, a blocked tile and a duplicate crossing all behave honestly', asyn
   //    and no revision is written. A restored village has nothing to save yet,
   //    so the indicator stays idle; the revision is read straight from the
   //    record the fixture wrote.
-  await page.clock.runFor(SAVE_DEBOUNCE_MS);
+  await jump(page, SAVE_DEBOUNCE_MS);
   const revisionBefore = await storedRevision(page);
   expect(revisionBefore).toBe(1);
 
@@ -368,7 +381,7 @@ test('cancel, a blocked tile and a duplicate crossing all behave honestly', asyn
   await expect(page.locator('#placement-banner')).toBeHidden();
   await expect(page.locator('#resource-gold-value')).toHaveText(KEEP_TWO_GOLD);
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
-  await page.clock.runFor(SAVE_DEBOUNCE_MS);
+  await jump(page, SAVE_DEBOUNCE_MS);
   expect(await storedRevision(page)).toBe(revisionBefore);
 
   // 2. A stroke that begins on the Keep is refused at its very first cell: the
@@ -397,13 +410,12 @@ test('cancel, a blocked tile and a duplicate crossing all behave honestly', asyn
   await expect(page.getByTestId('hint')).toHaveText(
     'Placed 2 wall segments, then stopped: that tile is already taken.',
   );
-  await page.clock.runFor(SAVE_DEBOUNCE_MS);
+  await jump(page, SAVE_DEBOUNCE_MS);
   const revisionAfterRock = await waitForRevisionAfter(page, revisionBefore);
 
   // Free the builder, then cross the same two tiles repeatedly: one wall each,
   // one charge each.
-  await page.clock.runFor(WALL_FINISH_MS);
-  await settle(page);
+  await jump(page, WALL_FINISH_MS);
   await expect(page.locator('#builders-count')).toHaveText('2 / 2 available');
   await dragTiles(page, [
     { x: 14, y: 30 },
@@ -416,9 +428,8 @@ test('cancel, a blocked tile and a duplicate crossing all behave honestly', asyn
 
   // 4. All of it survives a reload: the prefix wall, the two crossed tiles, and
   //    the rock that stopped the stroke.
-  await page.clock.runFor(WALL_FINISH_MS);
-  await settle(page);
-  await page.clock.runFor(SAVE_DEBOUNCE_MS);
+  await jump(page, WALL_FINISH_MS);
+  await jump(page, SAVE_DEBOUNCE_MS);
   await waitForRevisionAfter(page, revisionAfterRock);
 
   await page.reload();
