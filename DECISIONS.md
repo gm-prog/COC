@@ -660,3 +660,49 @@ and `clock_behind` now share one rule with the other non-durable states, and a t
 whole set is in that one selector list, so a future state cannot be added without styling. The
 status text and the hint line are asserted to agree, all text goes through `i18n`, and view-only
 interaction (selection, panning, zooming) stays available in both states.
+
+## D38 — 2026-10-21 · Move Mode is a client mode over an unchanged command
+
+§7.1 asks for a way to rearrange the village ("drag to move a building in edit mode") and §8.3
+lists `MoveBuilding` under "Layout editing". The command has existed and been tested since Phase 1;
+what was missing was the interaction. Five choices shaped it.
+
+**The preview _is_ the command.** `previewBuildingMove` runs `applyCommand(MoveBuilding)` on a
+snapshot and throws the result away, exactly as `previewBuildingPlacement` does. A player therefore
+sees green only where the engine would accept the move — footprint size, map bounds, the decorative
+margin, occupancy (including obstacles) and the building's own tiles are all decided in one place.
+Re-implementing any of that in the client would create a second rulebook that could disagree with
+the authoritative one, and the disagreement would only show up as a rejected drop.
+
+**One interaction union, not two flags.** `BootScene` used a nullable `placementType`; adding a
+second nullable move field would have made "placing while moving" representable and forced every
+branch to clear both. Instead `VillageInteraction` is `idle | placing | moving`, and entering a mode
+assigns a variant (replacing whatever was there). Both modes share the placement banner, the ghost
+layer and the Cancel button, so there is one copy of "a ghost on the map", one Cancel affordance and
+one Escape branch. This is the smallest change that makes mutual exclusion structural rather than
+remembered.
+
+**A move costs nothing, because the command says so.** D27 made `PlaceBuilding` charge resources and
+occupy a builder; it deliberately left `MoveBuilding` and `RemoveObstacle` free and instant, because
+§8.3 groups all three as layout edits. Inventing a move cost here would have been a new rule added
+by the client, so the client adds none — and the browser test asserts that resources and builders
+are unchanged by a move.
+
+**Tapping the building's own tiles ends the mode instead of re-placing it.** The command accepts
+that destination as a legal no-op, but accepting it would emit an event, advance `lastSyncAt` and
+write a save for a village that did not change. The UI treats it as "done": it leaves Move Mode and
+says so. This is a client optimisation; the simulation's no-op contract is untouched and still
+covered by its own tests.
+
+**Read-only is checked twice, and a conflict closes the mode.** Entering Move Mode is refused in a
+read-only session (a ghost would promise a drop that can never be saved), and every commit goes
+through `resolveMoveAttempt` → `runVillageAction`, whose read-only gate is the one used by
+placement, collection and upgrades. When an autosave conflict switches the session to read-only
+mid-move, the mode is cancelled and the ghost cleared, so the screen never offers an action the
+session cannot persist.
+
+Two smaller notes. The pure module imports `runVillageAction` rather than calling `applyCommand`
+directly for the commit, so the read-only gate cannot be forgotten by a future caller; the preview
+imports `applyCommand` because a prediction must not depend on whether saving is on. And the
+selection panel stays open during a move: it carries the building's details and its original
+coordinates, which is the reference point the player is moving _from_.

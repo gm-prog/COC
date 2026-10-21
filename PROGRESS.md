@@ -36,8 +36,9 @@ green/red placement previews that commit through sim-core construction rules. Ta
 storage-overflow feedback and the upgrade panel (preview and start) also run through sim-core, and
 the build → wait → collect → upgrade journey now has a real Chromium smoke test (`e2e/`,
 `pnpm test:e2e`). The village now persists to IndexedDB with a compare-and-swap write and an
-explicit v1 → v2 migration. Move controls, obstacle-removal UX, speed-up/cancel controls, progress
-bars and the Keep 2 completion criterion remain outstanding — see
+explicit v1 → v2 migration, and an existing building can be rearranged in Move Mode. Obstacle
+removal, drag-to-place walls, speed-up/cancel controls, progress bars and the Keep 2 completion
+criterion remain outstanding — see
 [Gate C](#gate-c--phase-3-client-village-scene--building-ux--in-progress).
 
 | Phase | Title                                | Status         |
@@ -437,7 +438,7 @@ named part · **Fail** = not implemented (or not yet demonstrated).
 | 3   | HUD: resource bars with caps, builder icons with countdowns, gem counter          | **Pass**    | `#village-hud`: gold/essence bars with `aria-valuenow`, shards/gems counters, per-builder icons and countdown list.                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | 4   | Shop with categories; locked items show the unlock requirement                    | **Partial** | Shop is a flat list (no categories); locked items show "Keep N required", limit, cost, builder and resource reasons.                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | 5   | Placement ghost (green/red + pattern)                                             | **Partial** | Green/red footprint and banner text; no hatch/pattern overlay.                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| 6   | Move mode                                                                         | **Fail**    | `MoveBuilding` exists in sim-core but has no client control.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 6   | Move mode                                                                         | **Pass**    | Select a building, press **Move**, pick a tile: the destination ghost is green/red from the `MoveBuilding` command itself, Escape or **Cancel** aborts, and the new position survives a reload. `apps/client/src/villageMove.ts` is pure and unit-tested (24 tests); `e2e/phase3-move-mode.spec.ts` proves the journey in Chromium.                                                                                                                                                                                                         |
 | 7   | Drag-to-place walls                                                               | **Fail**    | Walls are placed one placement at a time.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | 8   | Upgrade panel: cost, time, resulting stats, builder availability, speed-up button | **Partial** | Cost, time, stats and block reason are shown; there is no speed-up/cancel button.                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | 9   | Tap-to-collect with floating numbers                                              | **Pass**    | Tap collects (or the HUD **Collect** button); a floating canvas number reports accepted/overflow.                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -450,10 +451,10 @@ named part · **Fail** = not implemented (or not yet demonstrated).
 
 ### Tests
 
-| #   | Spec item                                                                      | Result   | Notes                                                                                                                                         |
-| --- | ------------------------------------------------------------------------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| 16  | Playwright smoke: new game → place mine → wait (mock time) → collect → upgrade | **Pass** | `e2e/phase3-village.spec.ts`, one Chromium worker, real Vite client, `page.clock` for time. Green in CI run 39568079376.                      |
-| 17  | Unit tests for UI state machines (placement mode, selection)                   | **Fail** | The client's unit tests cover `iso` and `cameraTransform` only; placement/selection live in `BootScene` and are exercised end-to-end instead. |
+| #   | Spec item                                                                      | Result      | Notes                                                                                                                                                                                                                                                          |
+| --- | ------------------------------------------------------------------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 16  | Playwright smoke: new game → place mine → wait (mock time) → collect → upgrade | **Pass**    | `e2e/phase3-village.spec.ts`, one Chromium worker, real Vite client, `page.clock` for time. Green in CI run 39568079376.                                                                                                                                       |
+| 17  | Unit tests for UI state machines (placement mode, selection)                   | **Partial** | Move Mode's interaction (enter/refuse/cancel, mode exclusivity, preview and commit outcomes) is a pure unit-tested state machine in `apps/client/src/villageMove.ts`. Placement and selection state still live only in `BootScene` and are covered end-to-end. |
 
 ### Done when
 
@@ -515,6 +516,32 @@ geometry the test needs was already exported as pure functions.
 | `pnpm test:e2e`                  | **passes in CI**          | Run 39568079376: `Install Playwright browser` + `Browser smoke test` green, whole job 1m44s. Not runnable in the authoring sandbox — Playwright's browser download is blocked there (`cdn.playwright.dev` → `ECONNRESET`) and the image has no system Chromium or NSS libraries, so a local run stops at `browserType.launch: Executable doesn't exist … chromium_headless_shell-1248` (the `webServer` half is proven: Vite serves `:5173`). The first CI run timed out because the long waits painted every frame; the test now fast-forwards and runs ~1 s of frames per jump. |
 | `pnpm format:check`              | **exit 1 (pre-existing)** | 10 warnings, all in files untouched here (`apps/client/src/*`, `index.html`, `styles.css`, `PHASE2_REPORT.md`, `limits.json`); each also fails on `d375b3b`. Every file in this change set is Prettier-clean.                                                                                                                                                                                                                                                                                                                                                                     |
 
+## What the Move Mode slice added
+
+| File                                                                 | Purpose                                                                                                                                                                                                                          |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/client/src/villageMove.ts`                                     | The pure half of Move Mode: `previewBuildingMove` predicts `MoveBuilding` on a snapshot; the `idle / placing / moving` interaction union makes the two modes exclusive; `resolveMoveAttempt` commits through `runVillageAction`. |
+| `apps/client/src/scenes/BootScene.ts`                                | Wires the mode: the Move action enters it, hovering previews the destination, a tap commits or reports why not, Escape / Cancel aborts, and a save conflict closes it.                                                           |
+| `apps/client/src/hud.ts`, `index.html`, `styles.css`, `i18n/en.json` | A localised **Move** button in the selection panel (hidden for obstacles) and the existing banner reused for the move title, green/red feedback and Cancel. Every string goes through `t()`.                                     |
+| `apps/client/test/villageMove.test.ts`                               | 24 tests: preview for each rule the command enforces, interaction transitions and refusals, no-op and read-only handling, and proof that the caller's state is never mutated.                                                    |
+| `apps/client/test/villageMoveHud.test.ts`                            | 7 tests: the Move action appears for buildings only, and the shared banner renders move copy without colliding with placement's.                                                                                                 |
+| `e2e/phase3-move-mode.spec.ts`                                       | Two Chromium journeys: move → saved → reload → still moved; and rejected / cancelled / no-op moves leave the record's `revision` unchanged.                                                                                      |
+
+`packages/sim-core` is untouched: the command already enforced every rule the feature needs.
+
+## Verification (Move Mode slice)
+
+| Command                          | Result               | Notes                                                                                                                                                                                                  |
+| -------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm install --frozen-lockfile` | **exit 0**           | Lockfile unchanged.                                                                                                                                                                                    |
+| `pnpm lint`                      | **exit 0**           | Includes the new module, both unit-test files and the new spec.                                                                                                                                        |
+| `pnpm typecheck`                 | **exit 0**           | 7 projects, incl. `e2e/` and `playwright.config.ts`.                                                                                                                                                   |
+| `pnpm test`                      | **exit 0**           | 36 files / 740 tests (was 34 / 709), including 31 new Move Mode tests.                                                                                                                                 |
+| `pnpm test:coverage`             | **exit 0**           | 97.68 % stmts · 92.33 % branches · 100 % functions · 97.68 % lines. As always this measures `packages/sim-core/src/**/*.ts`; it is not a client-coverage figure.                                       |
+| `pnpm build`                     | **exit 0**           | Client bundle built.                                                                                                                                                                                   |
+| `pnpm test:e2e`                  | **CI only**          | The authoring sandbox has no Chromium (`Executable doesn't exist … chromium_headless_shell-1248`) and Playwright's CDN is unreachable, so this is not claimed locally. CI runs all four browser tests. |
+| `pnpm format:check`              | **exit 1, baseline** | The same 10 pre-existing files as before this change; every file added or edited here is Prettier-clean.                                                                                               |
+
 ## Verification instructions
 
 ```bash
@@ -527,7 +554,7 @@ pnpm lint && pnpm typecheck  # typecheck now also covers e2e/ and playwright.con
 
 ## Remaining Phase 3 gaps
 
-1. Move mode and drag-to-place walls (items 6, 7).
+1. Drag-to-place walls (item 7).
 2. Obstacle removal UX (item 10).
 3. Speed-up / cancel controls in the upgrade panel (item 8).
 4. Build/upgrade progress bars and completion toasts (items 11, 12).
