@@ -255,8 +255,14 @@ export class Hud {
     this.el('shop-close')?.setAttribute('aria-label', t('shop.close'));
   }
 
-  setHint(): void {
-    this.text('hud-hint', t('hud.hint'));
+  /**
+   * Sets the hint line.
+   *
+   * Defaults to the standing hint; a caller that just refused an action passes
+   * the reason so the refusal is explained where the player is looking.
+   */
+  setHint(key: TranslationKey = 'hud.hint'): void {
+    this.text('hud-hint', t(key));
   }
 
   setFps(fps: number): void {
